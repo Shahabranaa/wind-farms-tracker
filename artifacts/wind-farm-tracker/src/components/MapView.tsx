@@ -400,6 +400,8 @@ export default memo(function MapView() {
 
     for (const loc of mappable) {
       if (!loc.connectedTo || !loc.latLng) continue;
+      // Only turbines (non-substations) originate inter-array / string-feeder segments
+      if (IS_SUBSTATION(loc.locationType)) continue;
       const target =
         locationById.get(loc.connectedTo) ?? locationByName.get(loc.connectedTo);
       if (!target?.latLng) continue;
@@ -451,7 +453,8 @@ export default memo(function MapView() {
       (l) => IS_SUBSTATION(l.locationType) && l.latLng,
     );
     if (substations.length === 0) {
-      return [{ key: "export-default", pts: [{ lat: 36.972, lng: -75.519 }, ...EXPORT_MID] as unknown as [number, number][] }];
+      const fallbackStart: [number, number] = [36.972, -75.519];
+      return [{ key: "export-default", pts: [fallbackStart, ...EXPORT_MID] }];
     }
     return substations.map((sub) => ({
       key: `export-${sub.name}`,
@@ -478,7 +481,7 @@ export default memo(function MapView() {
           <Polyline
             key={key}
             positions={pts}
-            pathOptions={{ color, weight: 1.5, opacity: 0.65 }}
+            pathOptions={{ color, weight: 1.5, opacity: 0.7 }}
           />
         ))}
 
@@ -487,7 +490,7 @@ export default memo(function MapView() {
           <Polyline
             key={key}
             positions={pts}
-            pathOptions={{ color, weight: 3.5, opacity: 0.85 }}
+            pathOptions={{ color, weight: 3, opacity: 0.9 }}
           />
         ))}
 
