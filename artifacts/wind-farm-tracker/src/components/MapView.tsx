@@ -399,34 +399,33 @@ export default memo(function MapView() {
     let resolved = 0;
 
     /**
-     * Primary path — iterate the Cable sheet rows.
-     * For each cable, resolve BOTH endpoints from locationByName, check
-     * whether either endpoint is a substation, and classify accordingly.
-     * String-feeder segments are drawn from Location_A → Location_B using
-     * the cable's own coordinates rather than the originating loc.latLng.
+     * Primary path — driven by each location's connectedTo field.
+     * Join: loc.connectedTo (Cable Name) → cableByName → cable endpoints
+     * → locationByName for both A and B → latLng pair.
+     * String-feeder segments are drawn cable-endpoint to cable-endpoint so
+     * that exact physical positions are used (not the originating loc.latLng).
      */
-    for (const cable of cables) {
+    for (const loc of mappable) {
+      if (!loc.connectedTo) continue;
+      // Only non-substation locations with a string assignment originate segments
+      if (IS_SUBSTATION(loc.locationType) || !loc.string) continue;
+
+      const cable = cableByName.get(loc.connectedTo);
+      if (!cable) continue;
+
       const b = cable.locationB;
       // Skip OSP endpoints (T1/T2/T3 prefix) and onshore anchors (_)
       if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) continue;
 
+      // Resolve BOTH cable endpoints so we can check whether either is a substation
       const locA = locationByName.get(cable.locationA);
       const locB = locationByName.get(cable.locationB);
       if (!locA?.latLng || !locB?.latLng) continue;
 
-      // Apply tab filter: the turbine end must belong to the active tab
-      if (activeTab !== "all") {
-        const turbineEnd = IS_SUBSTATION(locA.locationType) ? locB : locA;
-        if (
-          turbineEnd.primarySubStation !== activeTab &&
-          !turbineEnd.primarySubStation.includes(activeTab)
-        ) continue;
-      }
-
       resolved++;
       const aIsSub = IS_SUBSTATION(locA.locationType);
       const bIsSub = IS_SUBSTATION(locB.locationType);
-      const color = stringColorMap.get(cable.stringLink) ?? "#6b8aad";
+      const color = stringColorMap.get(cable.stringLink) ?? stringColorMap.get(loc.string) ?? "#6b8aad";
       const seg: CableSeg = {
         key: `cable-${cable.cableName}`,
         pts: [locA.latLng, locB.latLng],
@@ -438,10 +437,11 @@ export default memo(function MapView() {
     }
 
     /**
-     * Fallback path — fires only when the Cable sheet has no rows that
-     * resolve to valid latLng pairs (e.g. data not yet loaded, or the sheet
-     * schema has changed). Builds a simple pair-chain per string sorted by
-     * orderOfMarch so the map is never empty.
+     * Fallback path — fires only when zero connectedTo-based segments
+     * resolved (e.g. cableByName is empty because the sheet hasn't loaded
+     * yet, or all loc.connectedTo values are missing/unrecognised).
+     * Builds a simple pair-chain per string sorted by orderOfMarch so the
+     * map is never empty while data loads.
      */
     if (resolved === 0) {
       const stringMap = new Map<string, Location[]>();
@@ -465,7 +465,7 @@ export default memo(function MapView() {
     }
 
     return { interArray: ia, stringFeeder: sf };
-  }, [cables, mappable, locationByName, stringColorMap, showExportOnly, activeTab]);
+  }, [cables, mappable, locationByName, cableByName, stringColorMap, showExportOnly]);
 
   /**
    * Export cables — drawn from each substation's actual position.

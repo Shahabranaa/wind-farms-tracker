@@ -256,7 +256,8 @@ export default memo(function SummaryView() {
     const tabCables = cables.filter((c) => {
       const b = c.locationB;
       if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) return false;
-      if (activeTab === "all" || activeTab === "export") return true;
+      if (activeTab === "export") return false;
+      if (activeTab === "all") return true;
       return tabStrings.has(c.stringLink);
     });
 
