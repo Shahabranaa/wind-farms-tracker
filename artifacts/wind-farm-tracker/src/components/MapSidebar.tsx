@@ -1,16 +1,18 @@
 import { memo, useState, lazy, Suspense } from "react";
-import { ChevronLeft, ChevronRight, Activity, CalendarRange, Layers, BarChart3 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Activity, CalendarRange, Layers, BarChart3, ClipboardList } from "lucide-react";
 
-const ProgressView = lazy(() => import("./ProgressView"));
-const TimelineView = lazy(() => import("./TimelineView"));
+const ProgressView  = lazy(() => import("./ProgressView"));
+const TimelineView  = lazy(() => import("./TimelineView"));
+const SummaryView   = lazy(() => import("./SummaryView"));
 
-type Tab = "progress" | "timeline" | "heatmap" | "gantt";
+type Tab = "progress" | "timeline" | "heatmap" | "gantt" | "summary";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: "progress", label: "Progress", icon: <Activity className="h-3.5 w-3.5" /> },
+  { id: "progress", label: "Progress", icon: <Activity      className="h-3.5 w-3.5" /> },
   { id: "timeline", label: "Timeline", icon: <CalendarRange className="h-3.5 w-3.5" /> },
-  { id: "heatmap", label: "Heatmap", icon: <Layers className="h-3.5 w-3.5" /> },
-  { id: "gantt", label: "Gantt", icon: <BarChart3 className="h-3.5 w-3.5" /> },
+  { id: "heatmap",  label: "Heatmap",  icon: <Layers        className="h-3.5 w-3.5" /> },
+  { id: "gantt",    label: "Gantt",    icon: <BarChart3      className="h-3.5 w-3.5" /> },
+  { id: "summary",  label: "Summary",  icon: <ClipboardList className="h-3.5 w-3.5" /> },
 ];
 
 function TabLoader() {
@@ -31,8 +33,8 @@ function ComingSoon({ label }: { label: string }) {
 }
 
 export default memo(function MapSidebar() {
-  const [collapsed, setCollapsed] = useState(false);
-  const [activeTab, setActiveTab] = useState<Tab>("progress");
+  const [collapsed, setCollapsed]   = useState(false);
+  const [activeTab, setActiveTab]   = useState<Tab>("progress");
 
   if (collapsed) {
     return (
@@ -78,13 +80,13 @@ export default memo(function MapSidebar() {
         </button>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-border flex-shrink-0">
+      {/* Tabs — scrollable row so all 5 fit */}
+      <div className="flex border-b border-border flex-shrink-0 overflow-x-auto scrollbar-none">
         {TABS.map((t) => (
           <button
             key={t.id}
             onClick={() => setActiveTab(t.id)}
-            className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px] font-medium transition-colors border-b-2 ${
+            className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px] font-medium transition-colors border-b-2 whitespace-nowrap min-w-0 ${
               activeTab === t.id
                 ? "border-primary text-primary"
                 : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"
@@ -101,8 +103,9 @@ export default memo(function MapSidebar() {
         <Suspense fallback={<TabLoader />}>
           {activeTab === "progress" && <ProgressView />}
           {activeTab === "timeline" && <TimelineView />}
-          {activeTab === "heatmap" && <ComingSoon label="Heatmap" />}
-          {activeTab === "gantt" && <ComingSoon label="Gantt" />}
+          {activeTab === "heatmap"  && <ComingSoon label="Heatmap" />}
+          {activeTab === "gantt"    && <ComingSoon label="Gantt" />}
+          {activeTab === "summary"  && <SummaryView />}
         </Suspense>
       </div>
     </div>
