@@ -277,14 +277,18 @@ export default memo(function MapView() {
   }, [locations, activeTab, showExportOnly]);
 
   /**
-   * Dim set — date-driven installation-wave simulation.
+   * Dim set — campaign-date driven turbine highlighting.
    *
-   * When a date is selected that falls within the campaign span we compute
-   * how far through the overall schedule that date is (0 → 1) and use the
-   * turbines' orderOfMarch sequence as a proxy for installation order.
-   * Turbines not yet "reached" at that timeline position are dimmed, so
-   * dragging the scrubber left/right produces a visible wave sweeping
-   * through the array.
+   * Primary strategy (real field linkage):
+   *   campaign.name is matched against location.string (both contain string-group
+   *   IDs such as "A01", "B02").  When a date falls within one or more campaigns,
+   *   the turbines whose `string` matches an active campaign name are highlighted;
+   *   all others are dimmed.  The first word of campaign.name is also tried so
+   *   names like "A01 Foundation" still map to string "A01".
+   *
+   * Fallback (if no string-group matches are found in the live data):
+   *   Turbines are sorted by orderOfMarch and the first `progress × N` are lit,
+   *   producing a visible installation-wave as the scrubber moves.
    */
   const dimmedIds = useMemo(() => {
     if (!selectedDate || !mappable.length) return new Set<string>();
@@ -292,24 +296,49 @@ export default memo(function MapView() {
     const validCampaigns = campaigns.filter((c) => c.startDate && c.endDate);
     if (validCampaigns.length === 0) return new Set<string>();
 
+    // Which campaigns are active on the selected date?
+    const activeCampaigns = validCampaigns.filter(
+      (c) => selectedDate >= c.startDate! && selectedDate <= c.endDate!,
+    );
+    if (activeCampaigns.length === 0) return new Set<string>();
+
+    // Build the set of active string-group IDs from campaign names.
+    // Try exact match and first-word extraction ("A01 Foundation" → "A01").
+    const activeStrings = new Set<string>();
+    for (const c of activeCampaigns) {
+      const trimmed = c.name.trim();
+      activeStrings.add(trimmed);
+      const firstWord = trimmed.split(/[\s\-_]/)[0];
+      if (firstWord) activeStrings.add(firstWord);
+    }
+
+    // Check whether any location actually matches via the string field
+    const hasStringMatch = mappable.some((l) => activeStrings.has(l.string));
+
+    if (hasStringMatch) {
+      // Dim turbines whose string group is NOT part of the active campaign(s)
+      return new Set(
+        mappable
+          .filter((l) => !activeStrings.has(l.string))
+          .map((l) => l.locationId || l.name),
+      );
+    }
+
+    // Fallback: no name→string mapping found — use ordinal installation wave.
+    // Progress 0→1 maps to the fraction of turbines (sorted by orderOfMarch) that
+    // are "reached", so moving the scrubber visibly sweeps a highlight wave.
     const minMs = Math.min(...validCampaigns.map((c) => c.startDate!.getTime()));
     const maxMs = Math.max(...validCampaigns.map((c) => c.endDate!.getTime()));
-    const selMs = selectedDate.getTime();
+    const progress = Math.max(
+      0,
+      Math.min(1, (selectedDate.getTime() - minMs) / (maxMs - minMs)),
+    );
 
-    // Outside the full campaign range → no dimming
-    if (selMs < minMs || selMs > maxMs) return new Set<string>();
-
-    // 0–1 progress across the entire campaign span
-    const progress = Math.max(0, Math.min(1, (selMs - minMs) / (maxMs - minMs)));
-
-    // Sort by orderOfMarch (installation sequence); unset/NaN values go last
     const sorted = [...mappable].sort(
       (a, b) =>
         (parseFloat(a.orderOfMarch) || 9999) -
         (parseFloat(b.orderOfMarch) || 9999),
     );
-
-    // First `progress × N` turbines are "reached" — keep lit; the rest are dimmed
     const reachedCount = Math.round(progress * sorted.length);
     const reachedSet = new Set(
       sorted.slice(0, reachedCount).map((l) => l.locationId || l.name),
