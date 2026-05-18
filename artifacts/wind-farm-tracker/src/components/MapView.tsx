@@ -316,7 +316,7 @@ function Legend({
 /* ─── Main MapView ───────────────────────────────────── */
 
 export default memo(function MapView() {
-  const { locations, campaigns, locationById, locationByName, cableByName, isLoading } = useSheetData();
+  const { locations, campaigns, cables, locationById, locationByName, cableByName, isLoading } = useSheetData();
   const { activeTab, selectedDate } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
@@ -398,47 +398,52 @@ export default memo(function MapView() {
     const sf: CableSeg[] = [];
     let resolved = 0;
 
-    for (const loc of mappable) {
-      if (!loc.connectedTo || !loc.latLng) continue;
-      // Only non-substation locations with a string assignment originate cable segments.
-      if (IS_SUBSTATION(loc.locationType) || !loc.string) continue;
+    /**
+     * Primary path — iterate the Cable sheet rows.
+     * For each cable, resolve BOTH endpoints from locationByName, check
+     * whether either endpoint is a substation, and classify accordingly.
+     * String-feeder segments are drawn from Location_A → Location_B using
+     * the cable's own coordinates rather than the originating loc.latLng.
+     */
+    for (const cable of cables) {
+      const b = cable.locationB;
+      // Skip OSP endpoints (T1/T2/T3 prefix) and onshore anchors (_)
+      if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) continue;
 
-      // loc.connectedTo holds a Cable Name (e.g. "IAC-01"), not a location name.
-      // Resolve via the Cable sheet first; fall back to direct name/id lookup for
-      // any legacy rows that still store a location name.
-      let target = undefined;
-      let cableColor: string | undefined;
+      const locA = locationByName.get(cable.locationA);
+      const locB = locationByName.get(cable.locationB);
+      if (!locA?.latLng || !locB?.latLng) continue;
 
-      const cable = cableByName.get(loc.connectedTo);
-      if (cable) {
-        const b = cable.locationB;
-        // Skip OSP endpoints (T1/T2/T3 prefix) and onshore anchors (_)
-        if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) {
-          continue;
-        }
-        target = locationByName.get(b);
-        cableColor = stringColorMap.get(cable.stringLink) ?? stringColorMap.get(loc.string);
-      } else {
-        // Legacy fallback: connectedTo may store a location id or name directly
-        target = locationById.get(loc.connectedTo) ?? locationByName.get(loc.connectedTo);
-        cableColor = stringColorMap.get(loc.string);
+      // Apply tab filter: the turbine end must belong to the active tab
+      if (activeTab !== "all") {
+        const turbineEnd = IS_SUBSTATION(locA.locationType) ? locB : locA;
+        if (
+          turbineEnd.primarySubStation !== activeTab &&
+          !turbineEnd.primarySubStation.includes(activeTab)
+        ) continue;
       }
 
-      if (!target?.latLng) continue;
       resolved++;
-      const color = cableColor ?? "#6b8aad";
+      const aIsSub = IS_SUBSTATION(locA.locationType);
+      const bIsSub = IS_SUBSTATION(locB.locationType);
+      const color = stringColorMap.get(cable.stringLink) ?? "#6b8aad";
       const seg: CableSeg = {
-        key: `${loc.locationId || loc.name}->${loc.connectedTo}`,
-        pts: [loc.latLng, target.latLng],
+        key: `cable-${cable.cableName}`,
+        pts: [locA.latLng, locB.latLng],
         color,
-        kind: IS_SUBSTATION(target.locationType) ? "string-feeder" : "inter-array",
+        kind: aIsSub || bIsSub ? "string-feeder" : "inter-array",
       };
       if (seg.kind === "string-feeder") sf.push(seg);
       else ia.push(seg);
     }
 
+    /**
+     * Fallback path — fires only when the Cable sheet has no rows that
+     * resolve to valid latLng pairs (e.g. data not yet loaded, or the sheet
+     * schema has changed). Builds a simple pair-chain per string sorted by
+     * orderOfMarch so the map is never empty.
+     */
     if (resolved === 0) {
-      // Fallback: pair-chain per string sorted by orderOfMarch
       const stringMap = new Map<string, Location[]>();
       for (const loc of mappable) {
         if (!loc.string || !loc.latLng) continue;
@@ -460,7 +465,7 @@ export default memo(function MapView() {
     }
 
     return { interArray: ia, stringFeeder: sf };
-  }, [mappable, locationById, locationByName, cableByName, stringColorMap, showExportOnly]);
+  }, [cables, mappable, locationByName, stringColorMap, showExportOnly, activeTab]);
 
   /**
    * Export cables — drawn from each substation's actual position.

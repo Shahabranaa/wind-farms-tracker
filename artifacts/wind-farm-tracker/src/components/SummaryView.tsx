@@ -260,7 +260,7 @@ export default memo(function SummaryView() {
       return tabStrings.has(c.stringLink);
     });
 
-    const cableCount    = tabCables.length > 0 ? tabCables.length : Math.max(0, turbineCount - 1);
+    const cableCount    = tabCables.length;
     const cableEndCount = cableCount * 2;
     return { turbines, completed, turbineCount, cableEndCount, cableCount };
   }, [locations, cables, activeTab]);
