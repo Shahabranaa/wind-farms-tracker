@@ -67,14 +67,16 @@ const VESSELS: VesselDef[] = [
 
 /* ─── Icon factories ─────────────────────────────────── */
 
-function createTurbineIcon(status: string, isSubstation: boolean): L.DivIcon {
+function createTurbineIcon(status: string, isSubstation: boolean, label: string): L.DivIcon {
   const color = statusColor(status);
   const size = isSubstation ? 32 : 22;
   const c = size / 2;
   const r = c - 1.5;
   const bladeEnd = -(r - 5);
+  const labelY = size + 9;
+  const totalH = size + 12;
 
-  const html = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  const html = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${totalH}" viewBox="0 0 ${size} ${totalH}">
     <circle cx="${c}" cy="${c}" r="${r}" fill="#cfd4da" stroke="${color}" stroke-width="2.2"/>
     <g transform="translate(${c},${c})" opacity="0.52">
       <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round"/>
@@ -82,12 +84,15 @@ function createTurbineIcon(status: string, isSubstation: boolean): L.DivIcon {
       <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round" transform="rotate(240)"/>
     </g>
     <circle cx="${c}" cy="${c}" r="2.4" fill="#455060" opacity="0.9"/>
+    <text x="${c}" y="${labelY}" text-anchor="middle"
+      font-size="${isSubstation ? 8 : 7}" font-family="Poppins,Arial,sans-serif"
+      fill="#2c3e50" font-weight="600" letter-spacing="0.2">${label}</text>
   </svg>`;
 
   return L.divIcon({
     html,
     className: "",
-    iconSize: [size, size],
+    iconSize: [size, totalH],
     iconAnchor: [c, c],
     popupAnchor: [0, -(c + 2)],
   });
@@ -143,8 +148,8 @@ const TurbineMarker = memo(function TurbineMarker({
   if (!loc.latLng) return null;
   const isSub = loc.locationType === "Substation" || loc.locationType === "HV Station";
   const icon = useMemo(
-    () => createTurbineIcon(loc.progressStatus, isSub),
-    [loc.progressStatus, isSub],
+    () => createTurbineIcon(loc.progressStatus, isSub, loc.name),
+    [loc.progressStatus, isSub, loc.name],
   );
   return (
     <Marker position={loc.latLng} icon={icon} opacity={dimmed ? 0.18 : 1}>
@@ -258,7 +263,7 @@ function Legend({
 /* ─── Main MapView ───────────────────────────────────── */
 
 export default memo(function MapView() {
-  const { locations, campaigns, isLoading } = useSheetData();
+  const { locations, campaigns, locationById, isLoading } = useSheetData();
   const { activeTab, selectedDate } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
@@ -351,28 +356,48 @@ export default memo(function MapView() {
     );
   }, [selectedDate, campaigns, mappable]);
 
-  /* Inter-array cable polylines */
-  const cablePolylines = useMemo(() => {
+  /**
+   * Inter-array cable segments — one Polyline per connectedTo relationship.
+   * Each turbine's `connectedTo` field holds the locationId of the turbine
+   * it feeds into, forming the actual electrical daisy-chain topology.
+   * Falls back to string-sorted polylines if no connectedTo data exists.
+   */
+  const cableSegments = useMemo(() => {
     if (showExportOnly) return [];
+
+    // Primary: connectedTo-based segments (actual topology)
+    const segments: { key: string; pts: [[number, number], [number, number]] }[] = [];
+    for (const loc of mappable) {
+      if (!loc.connectedTo || !loc.latLng) continue;
+      const target = locationById.get(loc.connectedTo);
+      if (!target?.latLng) continue;
+      segments.push({
+        key: `${loc.locationId}->${loc.connectedTo}`,
+        pts: [loc.latLng, target.latLng],
+      });
+    }
+    if (segments.length > 0) return segments;
+
+    // Fallback: sort each string group by orderOfMarch and chain adjacent pairs
     const stringMap = new Map<string, Location[]>();
     for (const loc of mappable) {
-      if (!loc.string) continue;
+      if (!loc.string || !loc.latLng) continue;
       const arr = stringMap.get(loc.string) ?? [];
       arr.push(loc);
       stringMap.set(loc.string, arr);
     }
-    return Array.from(stringMap.entries())
-      .map(([stringId, locs]) => {
-        const sorted = [...locs].sort(
-          (a, b) => (parseFloat(a.orderOfMarch) || 0) - (parseFloat(b.orderOfMarch) || 0),
-        );
-        return {
-          stringId,
-          points: sorted.map((l) => l.latLng!).filter(Boolean) as [number, number][],
-        };
-      })
-      .filter((g) => g.points.length >= 2);
-  }, [mappable, showExportOnly]);
+    for (const [sid, locs] of stringMap) {
+      const sorted = [...locs].sort(
+        (a, b) => (parseFloat(a.orderOfMarch) || 0) - (parseFloat(b.orderOfMarch) || 0),
+      );
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const a = sorted[i], b = sorted[i + 1];
+        if (a.latLng && b.latLng)
+          segments.push({ key: `${sid}-${i}`, pts: [a.latLng, b.latLng] });
+      }
+    }
+    return segments;
+  }, [mappable, locationById, showExportOnly]);
 
   const useCanvas = mapZoom < CANVAS_ZOOM_THRESHOLD;
 
@@ -388,12 +413,12 @@ export default memo(function MapView() {
         <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} maxZoom={19} />
         <ZoomTracker onChange={setMapZoom} />
 
-        {/* Inter-array cables (rendered below markers) */}
-        {cablePolylines.map(({ stringId, points }) => (
+        {/* Inter-array cables — one segment per connectedTo link */}
+        {cableSegments.map(({ key, pts }) => (
           <Polyline
-            key={`iac-${stringId}`}
-            positions={points}
-            pathOptions={{ color: "#9ca3af", weight: 2, opacity: 0.75 }}
+            key={key}
+            positions={pts}
+            pathOptions={{ color: "#555e6e", weight: 1.5, opacity: 0.7 }}
           />
         ))}
 
