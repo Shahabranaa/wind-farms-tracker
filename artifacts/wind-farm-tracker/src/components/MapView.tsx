@@ -400,8 +400,10 @@ export default memo(function MapView() {
 
     for (const loc of mappable) {
       if (!loc.connectedTo || !loc.latLng) continue;
-      // Only turbines (non-substations) originate inter-array / string-feeder segments
-      if (IS_SUBSTATION(loc.locationType)) continue;
+      // Only turbine-type locations originate cable segments.
+      // Substations and HV stations are cable *targets* only (string-feeder endpoints),
+      // and any location without a string assignment is treated as infrastructure, not a turbine.
+      if (IS_SUBSTATION(loc.locationType) || !loc.string) continue;
       const target =
         locationById.get(loc.connectedTo) ?? locationByName.get(loc.connectedTo);
       if (!target?.latLng) continue;
