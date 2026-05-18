@@ -19,6 +19,7 @@ interface SheetDataContextValue {
   isLoading: boolean;
   isError: boolean;
   locationById: Map<string, Location>;
+  locationByName: Map<string, Location>;
 }
 
 const SheetDataContext = createContext<SheetDataContextValue | null>(null);
@@ -51,6 +52,14 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
     return m;
   }, [locations]);
 
+  const locationByName = useMemo(() => {
+    const m = new Map<string, Location>();
+    for (const loc of locations) {
+      if (loc.name) m.set(loc.name, loc);
+    }
+    return m;
+  }, [locations]);
+
   return (
     <SheetDataContext.Provider
       value={{
@@ -60,6 +69,7 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
         isLoading: locQuery.isLoading,
         isError: locQuery.isError || campQuery.isError,
         locationById,
+        locationByName,
       }}
     >
       {children}

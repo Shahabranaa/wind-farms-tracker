@@ -20,9 +20,11 @@ const TILE_ATTRIBUTION =
 
 const canvasRenderer = L.canvas({ padding: 0.5 });
 
-/* Export cable waypoints — CVOW1 approximate route */
-const EXPORT_CABLE: [number, number][] = [
-  [36.972, -75.519],
+/* Virginia Beach landfall waypoint — the export cable converges here */
+const VB_LANDFALL: [number, number] = [36.918, -75.995];
+
+/* Intermediate waypoints between farm and shore */
+const EXPORT_MID: [number, number][] = [
   [36.968, -75.556],
   [36.962, -75.610],
   [36.954, -75.668],
@@ -31,8 +33,38 @@ const EXPORT_CABLE: [number, number][] = [
   [36.930, -75.850],
   [36.924, -75.910],
   [36.920, -75.960],
-  [36.918, -75.995],
+  VB_LANDFALL,
 ];
+
+/* Stable per-string colour palette (12 colours, wraps for large arrays) */
+const STRING_COLORS = [
+  "#4e9af1", "#34c88a", "#f4b942", "#b87cf5",
+  "#f97316", "#14b8a6", "#ec4899", "#22d3ee",
+  "#fb7185", "#a3e635", "#818cf8", "#fbbf24",
+];
+
+function buildStringColorMap(locations: Location[]): Map<string, string> {
+  const strings = Array.from(
+    new Set(locations.map((l) => l.string).filter(Boolean)),
+  ).sort();
+  const m = new Map<string, string>();
+  strings.forEach((s, i) => m.set(s, STRING_COLORS[i % STRING_COLORS.length]));
+  return m;
+}
+
+/* ─── Cable segment types ────────────────────────────── */
+
+interface CableSeg {
+  key: string;
+  pts: [[number, number], [number, number]];
+  color: string;
+  kind: "inter-array" | "string-feeder";
+}
+
+const IS_SUBSTATION = (lt: string) =>
+  lt === "Substation" || lt === "HV Station" || lt === "Offshore Substation";
+
+/* ─── Vessel definitions ─────────────────────────────── */
 
 interface VesselDef {
   id: number;
@@ -105,7 +137,7 @@ function createVesselIcon(hdg: number): L.DivIcon {
   return L.divIcon({ html, className: "", iconSize: [13, 17], iconAnchor: [6, 8] });
 }
 
-/* ─── Zoom tracker (must live inside MapContainer) ───── */
+/* ─── Zoom tracker ───────────────────────────────────── */
 
 function ZoomTracker({ onChange }: { onChange: (z: number) => void }) {
   useMapEvents({ zoomend: (e) => onChange(e.target.getZoom()) });
@@ -133,6 +165,7 @@ function LocationPopup({ loc }: { loc: Location }) {
         {loc.string && <><span className="text-muted-foreground">String</span><span>{loc.string}</span></>}
         {loc.primarySubStation && <><span className="text-muted-foreground">Substation</span><span>{loc.primarySubStation}</span></>}
         {loc.locationType && <><span className="text-muted-foreground">Type</span><span>{loc.locationType}</span></>}
+        {loc.connectedTo && <><span className="text-muted-foreground">Connected to</span><span>{loc.connectedTo}</span></>}
         {loc.orderOfMarch && <><span className="text-muted-foreground">Order</span><span>{loc.orderOfMarch}</span></>}
         {loc.allocatedHours != null && <><span className="text-muted-foreground">Alloc. hrs</span><span>{loc.allocatedHours}</span></>}
       </div>
@@ -146,7 +179,7 @@ const TurbineMarker = memo(function TurbineMarker({
   loc, dimmed,
 }: { loc: Location; dimmed: boolean }) {
   if (!loc.latLng) return null;
-  const isSub = loc.locationType === "Substation" || loc.locationType === "HV Station";
+  const isSub = IS_SUBSTATION(loc.locationType);
   const icon = useMemo(
     () => createTurbineIcon(loc.progressStatus, isSub, loc.name),
     [loc.progressStatus, isSub, loc.name],
@@ -158,13 +191,12 @@ const TurbineMarker = memo(function TurbineMarker({
   );
 });
 
-/* Canvas fallback for low-zoom overview (<CANVAS_ZOOM_THRESHOLD) */
 const CanvasMarker = memo(function CanvasMarker({
   loc, dimmed,
 }: { loc: Location; dimmed: boolean }) {
   if (!loc.latLng) return null;
   const color = statusColor(loc.progressStatus);
-  const isSub = loc.locationType === "Substation" || loc.locationType === "HV Station";
+  const isSub = IS_SUBSTATION(loc.locationType);
   return (
     <CircleMarker
       center={loc.latLng}
@@ -235,6 +267,27 @@ function Legend({
               <span style={{ color: "#c8d4e0" }}>{label}</span>
             </div>
           ))}
+          <div className="mt-2 pt-2 border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+            <div className="flex items-center gap-2 py-0.5">
+              <svg width="24" height="4" style={{ flexShrink: 0 }}>
+                <line x1="0" y1="2" x2="24" y2="2" stroke="#6b8aad" strokeWidth="1.5" strokeOpacity="0.7"/>
+              </svg>
+              <span style={{ color: "#8ba8c0", fontSize: 10 }}>Inter-array</span>
+            </div>
+            <div className="flex items-center gap-2 py-0.5">
+              <svg width="24" height="4" style={{ flexShrink: 0 }}>
+                <line x1="0" y1="2" x2="24" y2="2" stroke="#6b8aad" strokeWidth="3" strokeOpacity="0.9"/>
+              </svg>
+              <span style={{ color: "#8ba8c0", fontSize: 10 }}>String feeder</span>
+            </div>
+            <div className="flex items-center gap-2 py-0.5">
+              <svg width="24" height="4" style={{ flexShrink: 0 }}>
+                <line x1="0" y1="2" x2="24" y2="2" stroke="#9ca3af" strokeWidth="3"
+                  strokeDasharray="4 3" strokeOpacity="0.85"/>
+              </svg>
+              <span style={{ color: "#8ba8c0", fontSize: 10 }}>Export cable</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -263,7 +316,7 @@ function Legend({
 /* ─── Main MapView ───────────────────────────────────── */
 
 export default memo(function MapView() {
-  const { locations, campaigns, locationById, isLoading } = useSheetData();
+  const { locations, campaigns, locationById, locationByName, isLoading } = useSheetData();
   const { activeTab, selectedDate } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
@@ -271,7 +324,10 @@ export default memo(function MapView() {
 
   const showExportOnly = activeTab === "export";
 
-  /* Filter locations by active tab */
+  /* Stable per-string colour map */
+  const stringColorMap = useMemo(() => buildStringColorMap(locations), [locations]);
+
+  /* Filter locations shown by the active tab */
   const mappable = useMemo(() => {
     const withPos = locations.filter((l) => l.latLng !== null);
     if (showExportOnly) return [];
@@ -281,34 +337,18 @@ export default memo(function MapView() {
     );
   }, [locations, activeTab, showExportOnly]);
 
-  /**
-   * Dim set — campaign-date driven turbine highlighting.
-   *
-   * Primary strategy (real field linkage):
-   *   campaign.name is matched against location.string (both contain string-group
-   *   IDs such as "A01", "B02").  When a date falls within one or more campaigns,
-   *   the turbines whose `string` matches an active campaign name are highlighted;
-   *   all others are dimmed.  The first word of campaign.name is also tried so
-   *   names like "A01 Foundation" still map to string "A01".
-   *
-   * Fallback (if no string-group matches are found in the live data):
-   *   Turbines are sorted by orderOfMarch and the first `progress × N` are lit,
-   *   producing a visible installation-wave as the scrubber moves.
-   */
+  /* Campaign-date driven dim set (unchanged) */
   const dimmedIds = useMemo(() => {
     if (!selectedDate || !mappable.length) return new Set<string>();
 
     const validCampaigns = campaigns.filter((c) => c.startDate && c.endDate);
     if (validCampaigns.length === 0) return new Set<string>();
 
-    // Which campaigns are active on the selected date?
     const activeCampaigns = validCampaigns.filter(
       (c) => selectedDate >= c.startDate! && selectedDate <= c.endDate!,
     );
     if (activeCampaigns.length === 0) return new Set<string>();
 
-    // Build the set of active string-group IDs from campaign names.
-    // Try exact match and first-word extraction ("A01 Foundation" → "A01").
     const activeStrings = new Set<string>();
     for (const c of activeCampaigns) {
       const trimmed = c.name.trim();
@@ -317,87 +357,107 @@ export default memo(function MapView() {
       if (firstWord) activeStrings.add(firstWord);
     }
 
-    // Check whether any location actually matches via the string field
     const hasStringMatch = mappable.some((l) => activeStrings.has(l.string));
-
     if (hasStringMatch) {
-      // Dim turbines whose string group is NOT part of the active campaign(s)
       return new Set(
-        mappable
-          .filter((l) => !activeStrings.has(l.string))
-          .map((l) => l.locationId || l.name),
+        mappable.filter((l) => !activeStrings.has(l.string)).map((l) => l.locationId || l.name),
       );
     }
 
-    // Fallback: no name→string mapping found — use ordinal installation wave.
-    // Progress 0→1 maps to the fraction of turbines (sorted by orderOfMarch) that
-    // are "reached", so moving the scrubber visibly sweeps a highlight wave.
     const minMs = Math.min(...validCampaigns.map((c) => c.startDate!.getTime()));
     const maxMs = Math.max(...validCampaigns.map((c) => c.endDate!.getTime()));
-    const progress = Math.max(
-      0,
-      Math.min(1, (selectedDate.getTime() - minMs) / (maxMs - minMs)),
-    );
-
+    const progress = Math.max(0, Math.min(1, (selectedDate.getTime() - minMs) / (maxMs - minMs)));
     const sorted = [...mappable].sort(
-      (a, b) =>
-        (parseFloat(a.orderOfMarch) || 9999) -
-        (parseFloat(b.orderOfMarch) || 9999),
+      (a, b) => (parseFloat(a.orderOfMarch) || 9999) - (parseFloat(b.orderOfMarch) || 9999),
     );
     const reachedCount = Math.round(progress * sorted.length);
-    const reachedSet = new Set(
-      sorted.slice(0, reachedCount).map((l) => l.locationId || l.name),
-    );
-
+    const reachedSet = new Set(sorted.slice(0, reachedCount).map((l) => l.locationId || l.name));
     return new Set(
-      mappable
-        .filter((l) => !reachedSet.has(l.locationId || l.name))
-        .map((l) => l.locationId || l.name),
+      mappable.filter((l) => !reachedSet.has(l.locationId || l.name)).map((l) => l.locationId || l.name),
     );
   }, [selectedDate, campaigns, mappable]);
 
   /**
-   * Inter-array cable segments — one Polyline per connectedTo relationship.
-   * Each turbine's `connectedTo` field holds the locationId of the turbine
-   * it feeds into, forming the actual electrical daisy-chain topology.
-   * Falls back to string-sorted polylines if no connectedTo data exists.
+   * Cable segments — three levels of the electrical hierarchy.
+   *
+   * For each location, resolve `connectedTo` via locationId first, then
+   * locationByName (the sheet stores turbine *names* like "G2G07", not IDs).
+   * Tag each segment:
+   *   inter-array   → turbine connects to another turbine (same/adjacent string)
+   *   string-feeder → turbine connects to a Substation / HV Station
+   *
+   * Falls back to orderOfMarch-sorted pair-chains when no connectedTo data resolves.
    */
-  const cableSegments = useMemo(() => {
-    if (showExportOnly) return [];
+  const { interArray, stringFeeder } = useMemo((): {
+    interArray: CableSeg[];
+    stringFeeder: CableSeg[];
+  } => {
+    if (showExportOnly) return { interArray: [], stringFeeder: [] };
 
-    // Primary: connectedTo-based segments (actual topology)
-    const segments: { key: string; pts: [[number, number], [number, number]] }[] = [];
+    const ia: CableSeg[] = [];
+    const sf: CableSeg[] = [];
+    let resolved = 0;
+
     for (const loc of mappable) {
       if (!loc.connectedTo || !loc.latLng) continue;
-      const target = locationById.get(loc.connectedTo);
+      const target =
+        locationById.get(loc.connectedTo) ?? locationByName.get(loc.connectedTo);
       if (!target?.latLng) continue;
-      segments.push({
-        key: `${loc.locationId}->${loc.connectedTo}`,
+      resolved++;
+      const color = stringColorMap.get(loc.string) ?? "#6b8aad";
+      const seg: CableSeg = {
+        key: `${loc.locationId || loc.name}->${loc.connectedTo}`,
         pts: [loc.latLng, target.latLng],
-      });
+        color,
+        kind: IS_SUBSTATION(target.locationType) ? "string-feeder" : "inter-array",
+      };
+      if (seg.kind === "string-feeder") sf.push(seg);
+      else ia.push(seg);
     }
-    if (segments.length > 0) return segments;
 
-    // Fallback: sort each string group by orderOfMarch and chain adjacent pairs
-    const stringMap = new Map<string, Location[]>();
-    for (const loc of mappable) {
-      if (!loc.string || !loc.latLng) continue;
-      const arr = stringMap.get(loc.string) ?? [];
-      arr.push(loc);
-      stringMap.set(loc.string, arr);
-    }
-    for (const [sid, locs] of stringMap) {
-      const sorted = [...locs].sort(
-        (a, b) => (parseFloat(a.orderOfMarch) || 0) - (parseFloat(b.orderOfMarch) || 0),
-      );
-      for (let i = 0; i < sorted.length - 1; i++) {
-        const a = sorted[i], b = sorted[i + 1];
-        if (a.latLng && b.latLng)
-          segments.push({ key: `${sid}-${i}`, pts: [a.latLng, b.latLng] });
+    if (resolved === 0) {
+      // Fallback: pair-chain per string sorted by orderOfMarch
+      const stringMap = new Map<string, Location[]>();
+      for (const loc of mappable) {
+        if (!loc.string || !loc.latLng) continue;
+        const arr = stringMap.get(loc.string) ?? [];
+        arr.push(loc);
+        stringMap.set(loc.string, arr);
+      }
+      for (const [sid, locs] of stringMap) {
+        const sorted = [...locs].sort(
+          (a, b) => (parseFloat(a.orderOfMarch) || 0) - (parseFloat(b.orderOfMarch) || 0),
+        );
+        const color = stringColorMap.get(sid) ?? "#6b8aad";
+        for (let i = 0; i < sorted.length - 1; i++) {
+          const a = sorted[i], b = sorted[i + 1];
+          if (a.latLng && b.latLng)
+            ia.push({ key: `${sid}-${i}`, pts: [a.latLng, b.latLng], color, kind: "inter-array" });
+        }
       }
     }
-    return segments;
-  }, [mappable, locationById, showExportOnly]);
+
+    return { interArray: ia, stringFeeder: sf };
+  }, [mappable, locationById, locationByName, stringColorMap, showExportOnly]);
+
+  /**
+   * Export cables — drawn from each substation's actual position.
+   * Resolves against the *full* locations array (not just the tab-filtered
+   * mappable set) so export cables always show on the export tab.
+   * Falls back to a single hardcoded route if no substation has a latLng.
+   */
+  const exportCables = useMemo(() => {
+    const substations = locations.filter(
+      (l) => IS_SUBSTATION(l.locationType) && l.latLng,
+    );
+    if (substations.length === 0) {
+      return [{ key: "export-default", pts: [{ lat: 36.972, lng: -75.519 }, ...EXPORT_MID] as unknown as [number, number][] }];
+    }
+    return substations.map((sub) => ({
+      key: `export-${sub.name}`,
+      pts: [sub.latLng!, ...EXPORT_MID] as [number, number][],
+    }));
+  }, [locations]);
 
   const useCanvas = mapZoom < CANVAS_ZOOM_THRESHOLD;
 
@@ -413,20 +473,32 @@ export default memo(function MapView() {
         <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} maxZoom={19} />
         <ZoomTracker onChange={setMapZoom} />
 
-        {/* Inter-array cables — one segment per connectedTo link */}
-        {cableSegments.map(({ key, pts }) => (
+        {/* 1 · Inter-array cables — thin, per-string colour */}
+        {interArray.map(({ key, pts, color }) => (
           <Polyline
             key={key}
             positions={pts}
-            pathOptions={{ color: "#555e6e", weight: 1.5, opacity: 0.7 }}
+            pathOptions={{ color, weight: 1.5, opacity: 0.65 }}
           />
         ))}
 
-        {/* Export cable */}
-        <Polyline
-          positions={EXPORT_CABLE}
-          pathOptions={{ color: "#6b7280", weight: 3, opacity: 0.8, dashArray: "6 4" }}
-        />
+        {/* 2 · String-feeder cables — thicker, same per-string colour */}
+        {stringFeeder.map(({ key, pts, color }) => (
+          <Polyline
+            key={key}
+            positions={pts}
+            pathOptions={{ color, weight: 3.5, opacity: 0.85 }}
+          />
+        ))}
+
+        {/* 3 · Export / main cables — thick dashed grey, one per substation */}
+        {exportCables.map(({ key, pts }) => (
+          <Polyline
+            key={key}
+            positions={pts}
+            pathOptions={{ color: "#9ca3af", weight: 3, opacity: 0.8, dashArray: "7 5" }}
+          />
+        ))}
 
         {/* Turbine markers — canvas fallback at low zoom */}
         {useCanvas
