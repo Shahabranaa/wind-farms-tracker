@@ -410,6 +410,31 @@ export default memo(function MapView() {
       if (sd.stringName) stringDefByName.set(sd.stringName, sd);
     }
 
+    /* ── Build OSP lookup ──────────────────────────────────────────────────
+     * The Cable sheet may reference the OSP under a slightly different name
+     * than what the Location sheet stores in `name`. Index every substation
+     * with latLng by:
+     *   1. Its exact `name` (already in locationByName, but included here for
+     *      consistency)
+     *   2. Its name lowercased + trimmed
+     *   3. Its `primarySubStation` value (turbines store this; the OSP that
+     *      "owns" a group of strings is reliably identified this way)
+     * This lets the chain-walk find the OSP even under name mismatches.
+     */
+    const ospByKey = new Map<string, Location>();
+    for (const [name, loc] of locationByName) {
+      if (!IS_SUBSTATION(loc.locationType) || !loc.latLng) continue;
+      ospByKey.set(name, loc);
+      ospByKey.set(name.toLowerCase().trim(), loc);
+      if (loc.primarySubStation) ospByKey.set(loc.primarySubStation, loc);
+    }
+
+    /* Helper: resolve a node name to a Location, trying OSP fallbacks */
+    const resolveNode = (nodeName: string): Location | undefined =>
+      locationByName.get(nodeName) ??
+      ospByKey.get(nodeName) ??
+      ospByKey.get(nodeName.toLowerCase().trim());
+
     /* ── Group cables by stringLink ── */
     const cablesByString = new Map<string, typeof cables>();
     for (const cable of cables) {
@@ -445,10 +470,17 @@ export default memo(function MapView() {
       }
 
       /* Determine walk start: prefer StringDef.startingLocation, else any
-         node in the adjacency that has only one neighbour (a chain endpoint) */
+         non-OSP node in the adjacency that has only one neighbour */
       const sdStart = stringDefByName.get(stringName)?.startingLocation;
       let walkStart: string | undefined = sdStart && adj.has(sdStart) ? sdStart : undefined;
       if (!walkStart) {
+        for (const [node, neighbours] of adj) {
+          // Prefer endpoint that is NOT an OSP so we walk turbine→OSP, not OSP→turbine
+          if (neighbours.length === 1 && !ospByKey.has(node)) { walkStart = node; break; }
+        }
+      }
+      if (!walkStart) {
+        // Last resort: any single-neighbour node
         for (const [node, neighbours] of adj) {
           if (neighbours.length === 1) { walkStart = node; break; }
         }
@@ -461,11 +493,12 @@ export default memo(function MapView() {
       visited.add(current);
 
       const interPts: [number, number][] = [];
-      const startLoc = locationByName.get(current);
+      const startLoc = resolveNode(current);
       if (startLoc?.latLng) interPts.push(startLoc.latLng);
 
       const MAX_ITER = 200;
       let iter = 0;
+      let feederEmitted = false;
 
       while (iter++ < MAX_ITER) {
         const neighbours = adj.get(current) ?? [];
@@ -473,11 +506,11 @@ export default memo(function MapView() {
         if (!next) break;
 
         visited.add(next);
-        const nextLoc = locationByName.get(next);
+        const nextLoc = resolveNode(next);
         if (!nextLoc?.latLng) { current = next; continue; }
 
         if (IS_SUBSTATION(nextLoc.locationType)) {
-          /* Last inter-array point already in interPts — emit string-feeder */
+          /* Chain terminates at OSP — emit string-feeder from last turbine */
           const lastPt = interPts[interPts.length - 1];
           if (lastPt) {
             sf.push({
@@ -486,6 +519,7 @@ export default memo(function MapView() {
               color,
               kind: "string-feeder",
             });
+            feederEmitted = true;
           }
           break;
         }
@@ -497,6 +531,33 @@ export default memo(function MapView() {
       if (interPts.length >= 2) {
         ia.push({ key: `ia-${stringName}`, pts: interPts, color, kind: "inter-array" });
         topologyResolved++;
+
+        /* ── Post-walk feeder fallback ─────────────────────────────────────
+         * If the topology walk built inter-array points but never hit the OSP
+         * (e.g. the Cable sheet doesn't include the feeder row, or the OSP
+         * name couldn't be resolved during the walk), use the turbine's own
+         * `primarySubStation` field — which explicitly names its OSP — to
+         * look up the substation lat/lng and draw the missing feeder segment.
+         */
+        if (!feederEmitted) {
+          const repTurbine = mappable.find(
+            (l) => l.string === stringName && !IS_SUBSTATION(l.locationType),
+          );
+          if (repTurbine?.primarySubStation) {
+            const osp =
+              ospByKey.get(repTurbine.primarySubStation) ??
+              ospByKey.get(repTurbine.primarySubStation.toLowerCase().trim());
+            if (osp?.latLng) {
+              const lastPt = interPts[interPts.length - 1];
+              sf.push({
+                key: `sf-${stringName}`,
+                pts: [lastPt, osp.latLng],
+                color,
+                kind: "string-feeder",
+              });
+            }
+          }
+        }
       }
     }
 
