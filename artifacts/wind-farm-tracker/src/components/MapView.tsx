@@ -276,20 +276,48 @@ export default memo(function MapView() {
     );
   }, [locations, activeTab, showExportOnly]);
 
-  /* Dim set: when a date is selected and falls in a campaign, dim non-active turbines */
+  /**
+   * Dim set — date-driven installation-wave simulation.
+   *
+   * When a date is selected that falls within the campaign span we compute
+   * how far through the overall schedule that date is (0 → 1) and use the
+   * turbines' orderOfMarch sequence as a proxy for installation order.
+   * Turbines not yet "reached" at that timeline position are dimmed, so
+   * dragging the scrubber left/right produces a visible wave sweeping
+   * through the array.
+   */
   const dimmedIds = useMemo(() => {
-    if (!selectedDate) return new Set<string>();
-    const inCampaign = campaigns.some(
-      (c) =>
-        c.startDate &&
-        c.endDate &&
-        selectedDate >= c.startDate &&
-        selectedDate <= c.endDate,
+    if (!selectedDate || !mappable.length) return new Set<string>();
+
+    const validCampaigns = campaigns.filter((c) => c.startDate && c.endDate);
+    if (validCampaigns.length === 0) return new Set<string>();
+
+    const minMs = Math.min(...validCampaigns.map((c) => c.startDate!.getTime()));
+    const maxMs = Math.max(...validCampaigns.map((c) => c.endDate!.getTime()));
+    const selMs = selectedDate.getTime();
+
+    // Outside the full campaign range → no dimming
+    if (selMs < minMs || selMs > maxMs) return new Set<string>();
+
+    // 0–1 progress across the entire campaign span
+    const progress = Math.max(0, Math.min(1, (selMs - minMs) / (maxMs - minMs)));
+
+    // Sort by orderOfMarch (installation sequence); unset/NaN values go last
+    const sorted = [...mappable].sort(
+      (a, b) =>
+        (parseFloat(a.orderOfMarch) || 9999) -
+        (parseFloat(b.orderOfMarch) || 9999),
     );
-    if (!inCampaign) return new Set<string>();
+
+    // First `progress × N` turbines are "reached" — keep lit; the rest are dimmed
+    const reachedCount = Math.round(progress * sorted.length);
+    const reachedSet = new Set(
+      sorted.slice(0, reachedCount).map((l) => l.locationId || l.name),
+    );
+
     return new Set(
       mappable
-        .filter((l) => l.progressStatus === "New" || l.progressStatus === "Excluded")
+        .filter((l) => !reachedSet.has(l.locationId || l.name))
         .map((l) => l.locationId || l.name),
     );
   }, [selectedDate, campaigns, mappable]);
