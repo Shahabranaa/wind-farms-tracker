@@ -316,7 +316,7 @@ function Legend({
 /* ─── Main MapView ───────────────────────────────────── */
 
 export default memo(function MapView() {
-  const { locations, campaigns, locationById, locationByName, isLoading } = useSheetData();
+  const { locations, campaigns, locationById, locationByName, cableByName, isLoading } = useSheetData();
   const { activeTab, selectedDate } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
@@ -400,15 +400,33 @@ export default memo(function MapView() {
 
     for (const loc of mappable) {
       if (!loc.connectedTo || !loc.latLng) continue;
-      // Only turbine-type locations originate cable segments.
-      // Substations and HV stations are cable *targets* only (string-feeder endpoints),
-      // and any location without a string assignment is treated as infrastructure, not a turbine.
+      // Only non-substation locations with a string assignment originate cable segments.
       if (IS_SUBSTATION(loc.locationType) || !loc.string) continue;
-      const target =
-        locationById.get(loc.connectedTo) ?? locationByName.get(loc.connectedTo);
+
+      // loc.connectedTo holds a Cable Name (e.g. "IAC-01"), not a location name.
+      // Resolve via the Cable sheet first; fall back to direct name/id lookup for
+      // any legacy rows that still store a location name.
+      let target = undefined;
+      let cableColor: string | undefined;
+
+      const cable = cableByName.get(loc.connectedTo);
+      if (cable) {
+        const b = cable.locationB;
+        // Skip OSP endpoints (T1/T2/T3 prefix) and onshore anchors (_)
+        if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) {
+          continue;
+        }
+        target = locationByName.get(b);
+        cableColor = stringColorMap.get(cable.stringLink) ?? stringColorMap.get(loc.string);
+      } else {
+        // Legacy fallback: connectedTo may store a location id or name directly
+        target = locationById.get(loc.connectedTo) ?? locationByName.get(loc.connectedTo);
+        cableColor = stringColorMap.get(loc.string);
+      }
+
       if (!target?.latLng) continue;
       resolved++;
-      const color = stringColorMap.get(loc.string) ?? "#6b8aad";
+      const color = cableColor ?? "#6b8aad";
       const seg: CableSeg = {
         key: `${loc.locationId || loc.name}->${loc.connectedTo}`,
         pts: [loc.latLng, target.latLng],
@@ -442,7 +460,7 @@ export default memo(function MapView() {
     }
 
     return { interArray: ia, stringFeeder: sf };
-  }, [mappable, locationById, locationByName, stringColorMap, showExportOnly]);
+  }, [mappable, locationById, locationByName, cableByName, stringColorMap, showExportOnly]);
 
   /**
    * Export cables — drawn from each substation's actual position.

@@ -63,6 +63,27 @@ export interface ApiUser {
   dateJoined: string;
 }
 
+export interface CableDef {
+  cableName: string;
+  locationA: string;
+  locationB: string;
+  siteLink: string;
+  fieldLink: string;
+  stringLink: string;
+  crossSection: string;
+  stringCount: number | null;
+  estimatedLength: number | null;
+}
+
+export interface StringDef {
+  stringName: string;
+  startingLocation: string;
+  progressStatus: string;
+  stringId: string;
+  site: string;
+  field: string;
+}
+
 export const STATUS_COLORS: Record<string, string> = {
   Completed: "#22c55e",
   "In Progress": "#52A8EC",

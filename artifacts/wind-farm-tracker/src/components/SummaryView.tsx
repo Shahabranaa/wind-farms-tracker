@@ -231,7 +231,7 @@ const CABLE_TESTS = [
 /* ─── Main SummaryView ───────────────────────────────── */
 
 export default memo(function SummaryView() {
-  const { locations, stringGroups, isLoading } = useSheetData();
+  const { locations, stringGroups, cables, isLoading } = useSheetData();
   const { activeTab } = useMapTab();
 
   const [summaryExpanded, setSummaryExpanded] = useState(true);
@@ -247,11 +247,23 @@ export default memo(function SummaryView() {
       return l.primarySubStation === activeTab || l.primarySubStation.includes(activeTab);
     });
     const completed = turbines.filter((l) => l.progressStatus === "Completed").length;
-    const turbineCount  = turbines.length;
-    const cableEndCount = turbineCount * 2;
-    const cableCount    = Math.max(0, turbineCount - 1);
+    const turbineCount = turbines.length;
+
+    // Build set of string IDs that belong to this tab for cable filtering
+    const tabStrings = new Set(turbines.map((l) => l.string).filter(Boolean));
+
+    // Filter real inter-array cables: skip OSP endpoints and onshore anchors
+    const tabCables = cables.filter((c) => {
+      const b = c.locationB;
+      if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) return false;
+      if (activeTab === "all" || activeTab === "export") return true;
+      return tabStrings.has(c.stringLink);
+    });
+
+    const cableCount    = tabCables.length > 0 ? tabCables.length : Math.max(0, turbineCount - 1);
+    const cableEndCount = cableCount * 2;
     return { turbines, completed, turbineCount, cableEndCount, cableCount };
-  }, [locations, activeTab]);
+  }, [locations, cables, activeTab]);
 
   const completedEnds   = completed * 2;
   const completedCables = Math.max(0, completed - 1);

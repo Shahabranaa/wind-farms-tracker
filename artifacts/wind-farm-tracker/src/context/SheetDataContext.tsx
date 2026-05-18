@@ -8,18 +8,23 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchLocations,
   fetchCampaigns,
+  fetchCables,
+  fetchStrings,
   computeStringGroups,
 } from "@/lib/sheetParser";
-import type { Location, Campaign, StringGroup } from "@/lib/types";
+import type { Location, Campaign, StringGroup, CableDef, StringDef } from "@/lib/types";
 
 interface SheetDataContextValue {
   locations: Location[];
   campaigns: Campaign[];
   stringGroups: StringGroup[];
+  cables: CableDef[];
+  stringDefs: StringDef[];
   isLoading: boolean;
   isError: boolean;
   locationById: Map<string, Location>;
   locationByName: Map<string, Location>;
+  cableByName: Map<string, CableDef>;
 }
 
 const SheetDataContext = createContext<SheetDataContextValue | null>(null);
@@ -39,8 +44,24 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
     gcTime: 10 * 60 * 1000,
   });
 
-  const locations = locQuery.data ?? [];
-  const campaigns = campQuery.data ?? [];
+  const cableQuery = useQuery({
+    queryKey: ["sheet", "cables"],
+    queryFn: fetchCables,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  const stringQuery = useQuery({
+    queryKey: ["sheet", "strings"],
+    queryFn: fetchStrings,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  const locations  = locQuery.data    ?? [];
+  const campaigns  = campQuery.data   ?? [];
+  const cables     = cableQuery.data  ?? [];
+  const stringDefs = stringQuery.data ?? [];
 
   const stringGroups = useMemo(() => computeStringGroups(locations), [locations]);
 
@@ -60,16 +81,27 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
     return m;
   }, [locations]);
 
+  const cableByName = useMemo(() => {
+    const m = new Map<string, CableDef>();
+    for (const cable of cables) {
+      if (cable.cableName) m.set(cable.cableName, cable);
+    }
+    return m;
+  }, [cables]);
+
   return (
     <SheetDataContext.Provider
       value={{
         locations,
         campaigns,
         stringGroups,
-        isLoading: locQuery.isLoading,
-        isError: locQuery.isError || campQuery.isError,
+        cables,
+        stringDefs,
+        isLoading: locQuery.isLoading || cableQuery.isLoading,
+        isError: locQuery.isError || campQuery.isError || cableQuery.isError,
         locationById,
         locationByName,
+        cableByName,
       }}
     >
       {children}
