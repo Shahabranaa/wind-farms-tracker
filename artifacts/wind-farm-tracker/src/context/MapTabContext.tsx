@@ -15,6 +15,8 @@ interface MapTabContextValue {
   setActiveTab: (tab: ProjectTab) => void;
   selectedDate: Date | null;
   setSelectedDate: (d: Date | null) => void;
+  selectedString: string | null;
+  setSelectedString: (s: string | null) => void;
 }
 
 const MapTabContext = createContext<MapTabContextValue | null>(null);
@@ -24,13 +26,22 @@ const FALLBACK: MapTabContextValue = {
   setActiveTab: () => {},
   selectedDate: null,
   setSelectedDate: () => {},
+  selectedString: null,
+  setSelectedString: () => {},
 };
 
 export function MapTabProvider({ children }: { children: ReactNode }) {
   const [activeTab, setActiveTab] = useState<ProjectTab>("all");
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [selectedString, setSelectedString] = useState<string | null>(null);
+
+  const handleSetActiveTab = (tab: ProjectTab) => {
+    setActiveTab(tab);
+    setSelectedString(null);
+  };
+
   return (
-    <MapTabContext.Provider value={{ activeTab, setActiveTab, selectedDate, setSelectedDate }}>
+    <MapTabContext.Provider value={{ activeTab, setActiveTab: handleSetActiveTab, selectedDate, setSelectedDate, selectedString, setSelectedString }}>
       {children}
     </MapTabContext.Provider>
   );

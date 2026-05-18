@@ -317,7 +317,7 @@ function Legend({
 
 export default memo(function MapView() {
   const { locations, campaigns, cables, stringDefs, locationByName, isLoading } = useSheetData();
-  const { activeTab, selectedDate } = useMapTab();
+  const { activeTab, selectedDate, selectedString } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
   const toggleVessels = useCallback(() => setShowVessels((v) => !v), []);
@@ -327,15 +327,18 @@ export default memo(function MapView() {
   /* Stable per-string colour map */
   const stringColorMap = useMemo(() => buildStringColorMap(locations), [locations]);
 
-  /* Filter locations shown by the active tab */
+  /* Filter locations shown by the active tab, then by selectedString */
   const mappable = useMemo(() => {
     const withPos = locations.filter((l) => l.latLng !== null);
     if (showExportOnly) return [];
-    if (activeTab === "all") return withPos;
-    return withPos.filter(
-      (l) => l.primarySubStation === activeTab || l.primarySubStation.includes(activeTab),
-    );
-  }, [locations, activeTab, showExportOnly]);
+    let filtered = activeTab === "all"
+      ? withPos
+      : withPos.filter((l) => l.primarySubStation === activeTab || l.primarySubStation.includes(activeTab));
+    if (selectedString) {
+      filtered = filtered.filter((l) => l.string === selectedString || IS_SUBSTATION(l.locationType));
+    }
+    return filtered;
+  }, [locations, activeTab, showExportOnly, selectedString]);
 
   /* Campaign-date driven dim set (unchanged) */
   const dimmedIds = useMemo(() => {

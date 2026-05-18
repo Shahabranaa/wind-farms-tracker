@@ -1,8 +1,8 @@
 import { memo, useMemo } from "react";
 import { useSheetData } from "@/context/SheetDataContext";
 import { useMapTab } from "@/context/MapTabContext";
-import { STATUS_COLORS } from "@/lib/types";
-import type { StringGroup } from "@/lib/types";
+import { STATUS_COLORS, statusColor } from "@/lib/types";
+import type { StringGroup, StringDef } from "@/lib/types";
 
 function MiniPie({ completed, inProgress, newCount, excluded }: Pick<StringGroup, "completed" | "inProgress" | "newCount" | "excluded">) {
   const total = completed + inProgress + newCount + excluded;
@@ -41,9 +41,35 @@ function MiniPie({ completed, inProgress, newCount, excluded }: Pick<StringGroup
   );
 }
 
-const StringCard = memo(function StringCard({ group }: { group: StringGroup }) {
+const StringCard = memo(function StringCard({
+  group,
+  stringDef,
+  selected,
+  dimmed,
+  onClick,
+}: {
+  group: StringGroup;
+  stringDef: StringDef | undefined;
+  selected: boolean;
+  dimmed: boolean;
+  onClick: () => void;
+}) {
+  const defStatus = stringDef?.progressStatus;
+  const defColor = defStatus ? statusColor(defStatus) : null;
+
   return (
-    <div className="px-3 py-2.5 border-b border-border last:border-0 hover:bg-white/3 transition-colors">
+    <button
+      onClick={onClick}
+      className="w-full text-left px-3 py-2.5 border-b border-border last:border-0 transition-colors"
+      style={{
+        background: selected
+          ? "rgba(82,168,236,0.12)"
+          : undefined,
+        opacity: dimmed ? 0.4 : 1,
+        outline: selected ? "1px solid rgba(82,168,236,0.35)" : undefined,
+        outlineOffset: selected ? "-1px" : undefined,
+      }}
+    >
       <div className="flex items-center gap-2">
         <MiniPie
           completed={group.completed}
@@ -53,7 +79,21 @@ const StringCard = memo(function StringCard({ group }: { group: StringGroup }) {
         />
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-1">
-            <span className="text-xs font-semibold text-foreground truncate">{group.stringId}</span>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs font-semibold text-foreground truncate">{group.stringId}</span>
+              {defStatus && defColor && (
+                <span
+                  className="text-[9px] font-medium px-1 py-0 rounded flex-shrink-0"
+                  style={{
+                    background: defColor + "28",
+                    color: defColor,
+                    border: `1px solid ${defColor}50`,
+                  }}
+                >
+                  {defStatus}
+                </span>
+              )}
+            </div>
             <span className="text-xs font-bold text-primary flex-shrink-0">{group.progressPercent}%</span>
           </div>
           <div className="text-[10px] text-muted-foreground truncate mb-1">
@@ -80,7 +120,7 @@ const StringCard = memo(function StringCard({ group }: { group: StringGroup }) {
           </div>
         </div>
       </div>
-    </div>
+    </button>
   );
 });
 
@@ -133,8 +173,8 @@ function SummaryBar({ groups }: { groups: StringGroup[] }) {
 }
 
 export default memo(function ProgressView() {
-  const { stringGroups, isLoading, isError } = useSheetData();
-  const { activeTab } = useMapTab();
+  const { stringGroups, stringDefs, isLoading, isError } = useSheetData();
+  const { activeTab, selectedString, setSelectedString } = useMapTab();
 
   const filteredGroups = useMemo(() => {
     if (activeTab === "all") return stringGroups;
@@ -143,6 +183,14 @@ export default memo(function ProgressView() {
       (g) => g.subStation === activeTab || g.subStation.includes(activeTab),
     );
   }, [stringGroups, activeTab]);
+
+  const stringDefByName = useMemo(() => {
+    const m = new Map<string, StringDef>();
+    for (const sd of stringDefs) {
+      if (sd.stringName) m.set(sd.stringName, sd);
+    }
+    return m;
+  }, [stringDefs]);
 
   if (isLoading) {
     return (
@@ -174,10 +222,46 @@ export default memo(function ProgressView() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <SummaryBar groups={filteredGroups} />
+      <SummaryBar groups={selectedString ? filteredGroups.filter((g) => g.stringId === selectedString) : filteredGroups} />
+
+      {/* String selector label + active filter indicator */}
+      <div
+        className="flex items-center justify-between px-3 py-1.5 border-b border-border flex-shrink-0"
+        style={{ background: "rgba(255,255,255,0.03)" }}
+      >
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          String filter
+        </span>
+        {selectedString && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-primary font-medium">
+              <strong>{selectedString}</strong>
+            </span>
+            <button
+              onClick={() => setSelectedString(null)}
+              className="text-[9px] text-muted-foreground hover:text-foreground transition-colors underline"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+        {!selectedString && (
+          <span className="text-[9px] text-muted-foreground/50">click to filter</span>
+        )}
+      </div>
+
       <div className="flex-1 overflow-y-auto">
         {filteredGroups.map((g) => (
-          <StringCard key={g.stringId} group={g} />
+          <StringCard
+            key={g.stringId}
+            group={g}
+            stringDef={stringDefByName.get(g.stringId)}
+            selected={selectedString === g.stringId}
+            dimmed={selectedString !== null && selectedString !== g.stringId}
+            onClick={() =>
+              setSelectedString(selectedString === g.stringId ? null : g.stringId)
+            }
+          />
         ))}
       </div>
     </div>
