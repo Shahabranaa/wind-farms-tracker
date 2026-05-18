@@ -56,7 +56,7 @@ function buildStringColorMap(locations: Location[]): Map<string, string> {
 
 interface CableSeg {
   key: string;
-  pts: [[number, number], [number, number]];
+  pts: [number, number][];
   color: string;
   kind: "inter-array" | "string-feeder";
 }
@@ -316,7 +316,7 @@ function Legend({
 /* ─── Main MapView ───────────────────────────────────── */
 
 export default memo(function MapView() {
-  const { locations, campaigns, cables, locationById, locationByName, cableByName, isLoading } = useSheetData();
+  const { locations, campaigns, cables, stringDefs, locationByName, isLoading } = useSheetData();
   const { activeTab, selectedDate } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
@@ -378,15 +378,19 @@ export default memo(function MapView() {
   }, [selectedDate, campaigns, mappable]);
 
   /**
-   * Cable segments — three levels of the electrical hierarchy.
+   * Cable polylines — one multi-segment Polyline per string, built by
+   * walking the Cable sheet topology chain (Location_A → Location_B) starting
+   * from each string's String_Starting_Location.
    *
-   * For each location, resolve `connectedTo` via locationId first, then
-   * locationByName (the sheet stores turbine *names* like "G2G07", not IDs).
-   * Tag each segment:
-   *   inter-array   → turbine connects to another turbine (same/adjacent string)
-   *   string-feeder → turbine connects to a Substation / HV Station
+   * For each string:
+   *   1. Collect all cables whose stringLink matches.
+   *   2. Build a bidirectional adjacency map between location names.
+   *   3. Walk from startingLocation, always moving to the unvisited neighbour.
+   *   4. When the next node is a substation, emit the path so far as the
+   *      inter-array polyline and the final edge as the string-feeder.
    *
-   * Falls back to orderOfMarch-sorted pair-chains when no connectedTo data resolves.
+   * Falls back to orderOfMarch-ordered multi-point polylines per string when
+   * the Cable topology produces nothing (e.g. data not yet loaded).
    */
   const { interArray, stringFeeder } = useMemo((): {
     interArray: CableSeg[];
@@ -396,57 +400,112 @@ export default memo(function MapView() {
 
     const ia: CableSeg[] = [];
     const sf: CableSeg[] = [];
-    let resolved = 0;
 
-    /**
-     * Primary path — driven by each location's connectedTo field.
-     * Join: loc.connectedTo (Cable Name) → cableByName → cable endpoints
-     * → locationByName for both A and B → latLng pair.
-     * String-feeder segments are drawn cable-endpoint to cable-endpoint so
-     * that exact physical positions are used (not the originating loc.latLng).
-     */
-    for (const loc of mappable) {
-      if (!loc.connectedTo) continue;
-      // Only non-substation locations with a string assignment originate segments
-      if (IS_SUBSTATION(loc.locationType) || !loc.string) continue;
+    /* ── Build lookup: stringName → StringDef ── */
+    const stringDefByName = new Map<string, { startingLocation: string }>();
+    for (const sd of stringDefs) {
+      if (sd.stringName) stringDefByName.set(sd.stringName, sd);
+    }
 
-      const cable = cableByName.get(loc.connectedTo);
-      if (!cable) continue;
+    /* ── Group cables by stringLink ── */
+    const cablesByString = new Map<string, typeof cables>();
+    for (const cable of cables) {
+      if (!cable.stringLink) continue;
+      const arr = cablesByString.get(cable.stringLink) ?? [];
+      arr.push(cable);
+      cablesByString.set(cable.stringLink, arr);
+    }
 
-      const b = cable.locationB;
-      // Skip OSP endpoints (T1/T2/T3 prefix) and onshore anchors (_)
-      if (!b || b.startsWith("T1") || b.startsWith("T2") || b.startsWith("T3") || b.startsWith("_")) continue;
+    /* ── Distinct strings present in the visible mappable set ── */
+    const visibleStrings = Array.from(
+      new Set(mappable.filter((l) => l.string && !IS_SUBSTATION(l.locationType)).map((l) => l.string)),
+    );
 
-      // Resolve BOTH cable endpoints so we can check whether either is a substation
-      const locA = locationByName.get(cable.locationA);
-      const locB = locationByName.get(cable.locationB);
-      if (!locA?.latLng || !locB?.latLng) continue;
+    let topologyResolved = 0;
 
-      resolved++;
-      const aIsSub = IS_SUBSTATION(locA.locationType);
-      const bIsSub = IS_SUBSTATION(locB.locationType);
-      const color = stringColorMap.get(cable.stringLink) ?? stringColorMap.get(loc.string) ?? "#6b8aad";
-      const seg: CableSeg = {
-        key: `cable-${cable.cableName}`,
-        pts: [locA.latLng, locB.latLng],
-        color,
-        kind: aIsSub || bIsSub ? "string-feeder" : "inter-array",
-      };
-      if (seg.kind === "string-feeder") sf.push(seg);
-      else ia.push(seg);
+    for (const stringName of visibleStrings) {
+      const color = stringColorMap.get(stringName) ?? "#6b8aad";
+      const stringCables = cablesByString.get(stringName) ?? [];
+      if (stringCables.length === 0) continue;
+
+      /* Build bidirectional adjacency for this string's cables */
+      const adj = new Map<string, string[]>();
+      for (const cable of stringCables) {
+        if (!cable.locationA || !cable.locationB) continue;
+        const aNeighbours = adj.get(cable.locationA) ?? [];
+        aNeighbours.push(cable.locationB);
+        adj.set(cable.locationA, aNeighbours);
+
+        const bNeighbours = adj.get(cable.locationB) ?? [];
+        bNeighbours.push(cable.locationA);
+        adj.set(cable.locationB, bNeighbours);
+      }
+
+      /* Determine walk start: prefer StringDef.startingLocation, else any
+         node in the adjacency that has only one neighbour (a chain endpoint) */
+      const sdStart = stringDefByName.get(stringName)?.startingLocation;
+      let walkStart: string | undefined = sdStart && adj.has(sdStart) ? sdStart : undefined;
+      if (!walkStart) {
+        for (const [node, neighbours] of adj) {
+          if (neighbours.length === 1) { walkStart = node; break; }
+        }
+      }
+      if (!walkStart) continue;
+
+      /* Walk the chain */
+      const visited = new Set<string>();
+      let current = walkStart;
+      visited.add(current);
+
+      const interPts: [number, number][] = [];
+      const startLoc = locationByName.get(current);
+      if (startLoc?.latLng) interPts.push(startLoc.latLng);
+
+      const MAX_ITER = 200;
+      let iter = 0;
+
+      while (iter++ < MAX_ITER) {
+        const neighbours = adj.get(current) ?? [];
+        const next = neighbours.find((n) => !visited.has(n));
+        if (!next) break;
+
+        visited.add(next);
+        const nextLoc = locationByName.get(next);
+        if (!nextLoc?.latLng) { current = next; continue; }
+
+        if (IS_SUBSTATION(nextLoc.locationType)) {
+          /* Last inter-array point already in interPts — emit string-feeder */
+          const lastPt = interPts[interPts.length - 1];
+          if (lastPt) {
+            sf.push({
+              key: `sf-${stringName}`,
+              pts: [lastPt, nextLoc.latLng],
+              color,
+              kind: "string-feeder",
+            });
+          }
+          break;
+        }
+
+        interPts.push(nextLoc.latLng);
+        current = next;
+      }
+
+      if (interPts.length >= 2) {
+        ia.push({ key: `ia-${stringName}`, pts: interPts, color, kind: "inter-array" });
+        topologyResolved++;
+      }
     }
 
     /**
-     * Fallback path — fires only when zero connectedTo-based segments
-     * resolved (e.g. cableByName is empty because the sheet hasn't loaded
-     * yet, or all loc.connectedTo values are missing/unrecognised).
-     * Builds a simple pair-chain per string sorted by orderOfMarch so the
-     * map is never empty while data loads.
+     * Fallback — fires only when the topology walk produced nothing
+     * (cables not yet loaded / all stringLink values missing).
+     * Builds one multi-point Polyline per string sorted by orderOfMarch.
      */
-    if (resolved === 0) {
+    if (topologyResolved === 0) {
       const stringMap = new Map<string, Location[]>();
       for (const loc of mappable) {
-        if (!loc.string || !loc.latLng) continue;
+        if (!loc.string || !loc.latLng || IS_SUBSTATION(loc.locationType)) continue;
         const arr = stringMap.get(loc.string) ?? [];
         arr.push(loc);
         stringMap.set(loc.string, arr);
@@ -456,16 +515,13 @@ export default memo(function MapView() {
           (a, b) => (parseFloat(a.orderOfMarch) || 0) - (parseFloat(b.orderOfMarch) || 0),
         );
         const color = stringColorMap.get(sid) ?? "#6b8aad";
-        for (let i = 0; i < sorted.length - 1; i++) {
-          const a = sorted[i], b = sorted[i + 1];
-          if (a.latLng && b.latLng)
-            ia.push({ key: `${sid}-${i}`, pts: [a.latLng, b.latLng], color, kind: "inter-array" });
-        }
+        const pts = sorted.filter((l) => l.latLng).map((l) => l.latLng as [number, number]);
+        if (pts.length >= 2) ia.push({ key: `fb-${sid}`, pts, color, kind: "inter-array" });
       }
     }
 
     return { interArray: ia, stringFeeder: sf };
-  }, [cables, mappable, locationByName, cableByName, stringColorMap, showExportOnly]);
+  }, [cables, stringDefs, mappable, locationByName, stringColorMap, showExportOnly]);
 
   /**
    * Export cables — drawn from each substation's actual position.
