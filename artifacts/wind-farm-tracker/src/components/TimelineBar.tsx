@@ -1,17 +1,13 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useRef } from "react";
 import { useSheetData } from "@/context/SheetDataContext";
+import { useMapTab } from "@/context/MapTabContext";
 import type { Campaign } from "@/lib/types";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
 const CAMPAIGN_COLORS = [
   "#52A8EC", "#22c55e", "#f59e0b", "#a78bfa",
   "#f97316", "#10b981", "#e879f9", "#38bdf8",
 ];
-
-function dateToMs(d: Date | null): number {
-  return d ? d.getTime() : 0;
-}
 
 interface CampaignBar {
   campaign: Campaign;
@@ -20,134 +16,50 @@ interface CampaignBar {
   color: string;
 }
 
-export default memo(function TimelineBar() {
-  const { campaigns } = useSheetData();
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
+interface Layout {
+  bars: CampaignBar[];
+  months: { label: string; pct: number }[];
+  minMs: number;
+  rangeMs: number;
+}
 
-  const { bars, months, minMs, rangeMs } = useMemo(() => {
-    const valid = campaigns.filter((c) => c.startDate && c.endDate);
-    if (valid.length === 0) {
-      const now = new Date();
-      const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
-      const end = new Date(now.getFullYear(), now.getMonth() + 7, 1);
-      const minMs = start.getTime();
-      const rangeMs = end.getTime() - minMs;
-      return { bars: [], months: buildMonths(start, end), minMs, rangeMs };
-    }
+function buildLayout(campaigns: Campaign[]): Layout {
+  const valid = campaigns.filter((c) => c.startDate && c.endDate);
+  const fallbackStart = new Date();
+  fallbackStart.setMonth(fallbackStart.getMonth() - 5);
+  const fallbackEnd = new Date();
+  fallbackEnd.setMonth(fallbackEnd.getMonth() + 7);
 
-    const allStarts = valid.map((c) => dateToMs(c.startDate));
-    const allEnds = valid.map((c) => dateToMs(c.endDate));
-    const minMs = Math.min(...allStarts);
-    const maxMs = Math.max(...allEnds);
-    const pad = (maxMs - minMs) * 0.04;
-    const rangeMs = maxMs - minMs + pad * 2;
-    const start = new Date(minMs - pad);
-    const end = new Date(maxMs + pad);
+  if (valid.length === 0) {
+    return {
+      bars: [],
+      months: buildMonths(fallbackStart, fallbackEnd),
+      minMs: fallbackStart.getTime(),
+      rangeMs: fallbackEnd.getTime() - fallbackStart.getTime(),
+    };
+  }
 
-    const bars: CampaignBar[] = valid.map((c, i) => ({
-      campaign: c,
-      left: ((dateToMs(c.startDate) - (minMs - pad)) / rangeMs) * 100,
-      width: ((dateToMs(c.endDate!) - dateToMs(c.startDate)) / rangeMs) * 100,
-      color: CAMPAIGN_COLORS[i % CAMPAIGN_COLORS.length],
-    }));
+  const allStarts = valid.map((c) => c.startDate!.getTime());
+  const allEnds = valid.map((c) => c.endDate!.getTime());
+  const rawMin = Math.min(...allStarts);
+  const rawMax = Math.max(...allEnds);
+  const pad = (rawMax - rawMin) * 0.04;
+  const minMs = rawMin - pad;
+  const rangeMs = rawMax - rawMin + pad * 2;
 
-    return { bars, months: buildMonths(start, end), minMs: minMs - pad, rangeMs };
-  }, [campaigns]);
+  const bars: CampaignBar[] = valid.map((c, i) => ({
+    campaign: c,
+    left: ((c.startDate!.getTime() - minMs) / rangeMs) * 100,
+    width: ((c.endDate!.getTime() - c.startDate!.getTime()) / rangeMs) * 100,
+    color: CAMPAIGN_COLORS[i % CAMPAIGN_COLORS.length],
+  }));
 
-  return (
-    <div
-      className="flex-shrink-0 border-t border-border select-none"
-      style={{ height: 44, background: "hsl(207 79% 15%)" }}
-    >
-      <div className="relative h-full overflow-hidden px-2">
-        {/* Month tick labels */}
-        <div className="absolute top-0 left-0 right-0 h-full pointer-events-none">
-          {months.map(({ label, pct }) => (
-            <div
-              key={label}
-              className="absolute top-1.5 text-[9px] text-muted-foreground/60 -translate-x-1/2"
-              style={{ left: `${pct}%` }}
-            >
-              {label}
-            </div>
-          ))}
-          {/* tick lines */}
-          {months.map(({ label, pct }) => (
-            <div
-              key={`tick-${label}`}
-              className="absolute bottom-0 w-px"
-              style={{
-                left: `${pct}%`,
-                top: 16,
-                background: "rgba(255,255,255,0.05)",
-              }}
-            />
-          ))}
-        </div>
-
-        {/* Campaign bars */}
-        <div className="absolute left-2 right-2 top-0 bottom-0 flex items-center">
-          {bars.map(({ campaign, left, width, color }) => {
-            const hovered = hoveredId === campaign.campaignId;
-            return (
-              <div
-                key={campaign.campaignId}
-                className="absolute flex items-center transition-all cursor-pointer"
-                style={{
-                  left: `${left}%`,
-                  width: `${Math.max(width, 1)}%`,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  height: hovered ? 16 : 12,
-                }}
-                onMouseEnter={() => setHoveredId(campaign.campaignId)}
-                onMouseLeave={() => setHoveredId(null)}
-                title={`${campaign.name}: ${campaign.startDate?.toLocaleDateString()} – ${campaign.endDate?.toLocaleDateString()}`}
-              >
-                <div
-                  className="w-full h-full rounded-sm"
-                  style={{
-                    background: color,
-                    opacity: hovered ? 0.95 : 0.65,
-                    boxShadow: hovered ? `0 0 6px ${color}88` : "none",
-                  }}
-                />
-                {hovered && (
-                  <div
-                    className="absolute bottom-full mb-1.5 left-0 whitespace-nowrap text-[10px] font-medium px-1.5 py-0.5 rounded z-10"
-                    style={{ background: "hsl(207 79% 22%)", color: "#e2eaf2", border: "1px solid rgba(255,255,255,0.1)" }}
-                  >
-                    {campaign.name}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Today indicator */}
-        <TodayIndicator minMs={minMs} rangeMs={rangeMs} />
-      </div>
-    </div>
-  );
-});
-
-function TodayIndicator({ minMs, rangeMs }: { minMs: number; rangeMs: number }) {
-  const pct = ((Date.now() - minMs) / rangeMs) * 100;
-  if (pct < 0 || pct > 100) return null;
-  return (
-    <div
-      className="absolute top-0 bottom-0 w-px z-20 pointer-events-none"
-      style={{ left: `${pct}%`, background: "rgba(255,80,80,0.7)" }}
-    >
-      <div
-        className="absolute top-1 text-[8px] font-semibold -translate-x-1/2 px-1 rounded"
-        style={{ background: "rgba(220,50,50,0.85)", color: "#fff" }}
-      >
-        TODAY
-      </div>
-    </div>
-  );
+  return {
+    bars,
+    months: buildMonths(new Date(minMs), new Date(minMs + rangeMs)),
+    minMs,
+    rangeMs,
+  };
 }
 
 function buildMonths(start: Date, end: Date): { label: string; pct: number }[] {
@@ -166,3 +78,166 @@ function buildMonths(start: Date, end: Date): { label: string; pct: number }[] {
   }
   return months;
 }
+
+export default memo(function TimelineBar() {
+  const { campaigns } = useSheetData();
+  const { selectedDate, setSelectedDate } = useMapTab();
+  const barRef = useRef<HTMLDivElement>(null);
+
+  const layout = useMemo(() => buildLayout(campaigns), [campaigns]);
+  const { bars, months, minMs, rangeMs } = layout;
+
+  const selectedPct = useMemo(() => {
+    if (!selectedDate) return null;
+    const pct = ((selectedDate.getTime() - minMs) / rangeMs) * 100;
+    return Math.max(0, Math.min(100, pct));
+  }, [selectedDate, minMs, rangeMs]);
+
+  const todayPct = useMemo(() => {
+    const pct = ((Date.now() - minMs) / rangeMs) * 100;
+    return pct >= 0 && pct <= 100 ? pct : null;
+  }, [minMs, rangeMs]);
+
+  function posToDate(clientX: number): Date {
+    if (!barRef.current) return new Date();
+    const rect = barRef.current.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return new Date(minMs + pct * rangeMs);
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    setSelectedDate(posToDate(e.clientX));
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.buttons === 0) return;
+    setSelectedDate(posToDate(e.clientX));
+  }
+
+  return (
+    <div
+      className="flex-shrink-0 border-t border-border"
+      style={{ height: 48, background: "hsl(207 79% 15%)" }}
+    >
+      <div className="relative h-full flex flex-col justify-between px-3 py-1 select-none">
+        {/* Month tick labels */}
+        <div className="relative h-4 pointer-events-none">
+          {months.map(({ label, pct }) => (
+            <span
+              key={label}
+              className="absolute text-[9px] text-muted-foreground/55 -translate-x-1/2 whitespace-nowrap"
+              style={{ left: `${pct}%`, top: 0 }}
+            >
+              {label}
+            </span>
+          ))}
+        </div>
+
+        {/* Scrubber track */}
+        <div
+          ref={barRef}
+          className="relative flex-1 cursor-crosshair"
+          style={{ minHeight: 20 }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+        >
+          {/* tick lines */}
+          {months.map(({ label, pct }) => (
+            <div
+              key={`tick-${label}`}
+              className="absolute top-0 bottom-0 w-px pointer-events-none"
+              style={{ left: `${pct}%`, background: "rgba(255,255,255,0.04)" }}
+            />
+          ))}
+
+          {/* Campaign bars */}
+          {bars.map(({ campaign, left, width, color }) => {
+            const isActive =
+              selectedDate !== null &&
+              campaign.startDate !== null &&
+              campaign.endDate !== null &&
+              selectedDate >= campaign.startDate &&
+              selectedDate <= campaign.endDate;
+
+            return (
+              <div
+                key={campaign.campaignId}
+                className="absolute pointer-events-none rounded-sm"
+                style={{
+                  left: `${left}%`,
+                  width: `${Math.max(width, 0.5)}%`,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  height: isActive ? 14 : 10,
+                  background: color,
+                  opacity: isActive ? 1 : 0.55,
+                  boxShadow: isActive ? `0 0 8px ${color}99` : "none",
+                  transition: "height 0.1s, opacity 0.1s",
+                }}
+                title={`${campaign.name}: ${campaign.startDate?.toLocaleDateString()} – ${campaign.endDate?.toLocaleDateString()}`}
+              />
+            );
+          })}
+
+          {/* Today indicator */}
+          {todayPct !== null && (
+            <div
+              className="absolute top-0 bottom-0 w-px pointer-events-none z-10"
+              style={{ left: `${todayPct}%`, background: "rgba(255,70,70,0.65)" }}
+            >
+              <div
+                className="absolute top-0 text-[8px] font-bold -translate-x-1/2 px-1 rounded-sm"
+                style={{ background: "rgba(210,40,40,0.85)", color: "#fff" }}
+              >
+                TODAY
+              </div>
+            </div>
+          )}
+
+          {/* Selected date scrubber */}
+          {selectedPct !== null && (
+            <div
+              className="absolute top-0 bottom-0 z-20 pointer-events-none"
+              style={{ left: `${selectedPct}%` }}
+            >
+              <div
+                className="absolute top-0 bottom-0 w-0.5"
+                style={{ background: "rgba(255,200,50,0.9)", left: -1 }}
+              />
+              {/* Diamond handle */}
+              <div
+                className="absolute w-3 h-3 rounded-sm"
+                style={{
+                  top: "50%",
+                  left: -6,
+                  transform: "translateY(-50%) rotate(45deg)",
+                  background: "#ffc832",
+                  boxShadow: "0 0 6px rgba(255,200,50,0.8)",
+                }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Clear button */}
+        {selectedDate && (
+          <button
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-medium px-1.5 py-0.5 rounded transition-colors z-30"
+            style={{
+              background: "rgba(255,200,50,0.15)",
+              color: "#ffc832",
+              border: "1px solid rgba(255,200,50,0.3)",
+            }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              setSelectedDate(null);
+            }}
+          >
+            Clear ×
+          </button>
+        )}
+      </div>
+    </div>
+  );
+});

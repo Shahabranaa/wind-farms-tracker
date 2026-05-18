@@ -1,5 +1,8 @@
 import { memo, useMemo, useState, useCallback } from "react";
-import { MapContainer, TileLayer, Popup, Polyline, Marker } from "react-leaflet";
+import {
+  MapContainer, TileLayer, Popup,
+  Polyline, Marker, CircleMarker, useMapEvents,
+} from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useSheetData } from "@/context/SheetDataContext";
@@ -9,10 +12,15 @@ import type { Location } from "@/lib/types";
 
 const CVOW_CENTER: [number, number] = [36.87, -75.50];
 const ZOOM = 10;
-const TILE_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
+const CANVAS_ZOOM_THRESHOLD = 9;
+const TILE_URL =
+  "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
 const TILE_ATTRIBUTION =
   '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com">CARTO</a>';
 
+const canvasRenderer = L.canvas({ padding: 0.5 });
+
+/* Export cable waypoints — CVOW1 approximate route */
 const EXPORT_CABLE: [number, number][] = [
   [36.972, -75.519],
   [36.968, -75.556],
@@ -35,27 +43,29 @@ interface VesselDef {
 }
 
 const VESSELS: VesselDef[] = [
-  { id: 1,  pos: [37.060, -75.340], hdg: 195, name: "GENESIS VENTURE",    type: "Construction" },
-  { id: 2,  pos: [36.985, -75.270], hdg: 140, name: "ACTA CENTAURUS",     type: "Survey" },
-  { id: 3,  pos: [37.120, -75.520], hdg: 220, name: "NDURANCE",           type: "Cable-lay" },
-  { id: 4,  pos: [36.840, -75.440], hdg: 30,  name: "BRAVE TERN",         type: "Installation" },
-  { id: 5,  pos: [36.920, -75.200], hdg: 270, name: "ORION",              type: "Heavy-lift" },
-  { id: 6,  pos: [37.180, -75.380], hdg: 160, name: "SEA INSTALLER",      type: "Installation" },
+  { id: 1,  pos: [37.060, -75.340], hdg: 195, name: "GENESIS VENTURE",     type: "Construction" },
+  { id: 2,  pos: [36.985, -75.270], hdg: 140, name: "ACTA CENTAURUS",      type: "Survey" },
+  { id: 3,  pos: [37.120, -75.520], hdg: 220, name: "NDURANCE",            type: "Cable-lay" },
+  { id: 4,  pos: [36.840, -75.440], hdg: 30,  name: "BRAVE TERN",          type: "Installation" },
+  { id: 5,  pos: [36.920, -75.200], hdg: 270, name: "ORION",               type: "Heavy-lift" },
+  { id: 6,  pos: [37.180, -75.380], hdg: 160, name: "SEA INSTALLER",       type: "Installation" },
   { id: 7,  pos: [36.780, -75.300], hdg: 350, name: "PACIFIC CONSTRUCTOR", type: "Construction" },
-  { id: 8,  pos: [36.870, -75.680], hdg: 85,  name: "SEAWAY STRASHNOV",   type: "Heavy-lift" },
-  { id: 9,  pos: [37.040, -75.760], hdg: 10,  name: "SCALDIS ASSISTANT",  type: "Survey" },
-  { id: 10, pos: [36.950, -75.830], hdg: 240, name: "CDFS PIONEER",       type: "Support" },
-  { id: 11, pos: [37.200, -75.650], hdg: 315, name: "OLYMPIC TAURUS",     type: "Support" },
-  { id: 12, pos: [36.720, -75.480], hdg: 60,  name: "VIDAR VIKING",       type: "Survey" },
-  { id: 13, pos: [36.990, -75.950], hdg: 180, name: "STRIL MERKUR",       type: "Supply" },
-  { id: 14, pos: [37.150, -75.200], hdg: 120, name: "ESVAGT CONNECTOR",   type: "Service" },
-  { id: 15, pos: [36.660, -75.360], hdg: 45,  name: "CL PRESTIGE",        type: "Cargo" },
-  { id: 16, pos: [37.080, -75.900], hdg: 280, name: "HAVILA JUPITER",     type: "Survey" },
-  { id: 17, pos: [36.810, -75.820], hdg: 200, name: "NEXUS",              type: "Support" },
-  { id: 18, pos: [37.250, -75.780], hdg: 100, name: "ISLAND CONSTRUCTOR", type: "Construction" },
-  { id: 19, pos: [36.740, -75.620], hdg: 170, name: "HIGHLAND NAVIGATOR", type: "Supply" },
-  { id: 20, pos: [37.010, -75.110], hdg: 230, name: "VOS SWEET",         type: "Service" },
+  { id: 8,  pos: [36.870, -75.680], hdg: 85,  name: "SEAWAY STRASHNOV",    type: "Heavy-lift" },
+  { id: 9,  pos: [37.040, -75.760], hdg: 10,  name: "SCALDIS ASSISTANT",   type: "Survey" },
+  { id: 10, pos: [36.950, -75.830], hdg: 240, name: "CDFS PIONEER",        type: "Support" },
+  { id: 11, pos: [37.200, -75.650], hdg: 315, name: "OLYMPIC TAURUS",      type: "Support" },
+  { id: 12, pos: [36.720, -75.480], hdg: 60,  name: "VIDAR VIKING",        type: "Survey" },
+  { id: 13, pos: [36.990, -75.950], hdg: 180, name: "STRIL MERKUR",        type: "Supply" },
+  { id: 14, pos: [37.150, -75.200], hdg: 120, name: "ESVAGT CONNECTOR",    type: "Service" },
+  { id: 15, pos: [36.660, -75.360], hdg: 45,  name: "CL PRESTIGE",         type: "Cargo" },
+  { id: 16, pos: [37.080, -75.900], hdg: 280, name: "HAVILA JUPITER",      type: "Survey" },
+  { id: 17, pos: [36.810, -75.820], hdg: 200, name: "NEXUS",               type: "Support" },
+  { id: 18, pos: [37.250, -75.780], hdg: 100, name: "ISLAND CONSTRUCTOR",  type: "Construction" },
+  { id: 19, pos: [36.740, -75.620], hdg: 170, name: "HIGHLAND NAVIGATOR",  type: "Supply" },
+  { id: 20, pos: [37.010, -75.110], hdg: 230, name: "VOS SWEET",           type: "Service" },
 ];
+
+/* ─── Icon factories ─────────────────────────────────── */
 
 function createTurbineIcon(status: string, isSubstation: boolean): L.DivIcon {
   const color = statusColor(status);
@@ -63,16 +73,15 @@ function createTurbineIcon(status: string, isSubstation: boolean): L.DivIcon {
   const c = size / 2;
   const r = c - 1.5;
   const bladeEnd = -(r - 5);
-  const opacity = status === "Excluded" ? 0.3 : 0.92;
 
   const html = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-    <circle cx="${c}" cy="${c}" r="${r}" fill="#cfd4da" stroke="${color}" stroke-width="2.2" opacity="${opacity}"/>
+    <circle cx="${c}" cy="${c}" r="${r}" fill="#cfd4da" stroke="${color}" stroke-width="2.2"/>
     <g transform="translate(${c},${c})" opacity="0.52">
       <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round"/>
       <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round" transform="rotate(120)"/>
       <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round" transform="rotate(240)"/>
     </g>
-    <circle cx="${c}" cy="${c}" r="2.4" fill="#455060" opacity="${opacity}"/>
+    <circle cx="${c}" cy="${c}" r="2.4" fill="#455060" opacity="0.9"/>
   </svg>`;
 
   return L.divIcon({
@@ -88,14 +97,17 @@ function createVesselIcon(hdg: number): L.DivIcon {
   const html = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="17" viewBox="0 0 13 17" style="transform:rotate(${hdg}deg);transform-origin:6.5px 8.5px;display:block">
     <polygon points="6.5,1 12,15 6.5,11.5 1,15" fill="#3d5a9e" stroke="rgba(255,255,255,0.7)" stroke-width="0.6" opacity="0.92"/>
   </svg>`;
-  return L.divIcon({
-    html,
-    className: "",
-    iconSize: [13, 17],
-    iconAnchor: [6, 8],
-    popupAnchor: [0, -10],
-  });
+  return L.divIcon({ html, className: "", iconSize: [13, 17], iconAnchor: [6, 8] });
 }
+
+/* ─── Zoom tracker (must live inside MapContainer) ───── */
+
+function ZoomTracker({ onChange }: { onChange: (z: number) => void }) {
+  useMapEvents({ zoomend: (e) => onChange(e.target.getZoom()) });
+  return null;
+}
+
+/* ─── Popup content ──────────────────────────────────── */
 
 function LocationPopup({ loc }: { loc: Location }) {
   const color = statusColor(loc.progressStatus);
@@ -123,16 +135,45 @@ function LocationPopup({ loc }: { loc: Location }) {
   );
 }
 
-const TurbineMarker = memo(function TurbineMarker({ loc }: { loc: Location }) {
+/* ─── Marker components ──────────────────────────────── */
+
+const TurbineMarker = memo(function TurbineMarker({
+  loc, dimmed,
+}: { loc: Location; dimmed: boolean }) {
   if (!loc.latLng) return null;
   const isSub = loc.locationType === "Substation" || loc.locationType === "HV Station";
-  const icon = useMemo(() => createTurbineIcon(loc.progressStatus, isSub), [loc.progressStatus, isSub]);
+  const icon = useMemo(
+    () => createTurbineIcon(loc.progressStatus, isSub),
+    [loc.progressStatus, isSub],
+  );
   return (
-    <Marker position={loc.latLng} icon={icon}>
-      <Popup maxWidth={280}>
-        <LocationPopup loc={loc} />
-      </Popup>
+    <Marker position={loc.latLng} icon={icon} opacity={dimmed ? 0.18 : 1}>
+      <Popup maxWidth={280}><LocationPopup loc={loc} /></Popup>
     </Marker>
+  );
+});
+
+/* Canvas fallback for low-zoom overview (<CANVAS_ZOOM_THRESHOLD) */
+const CanvasMarker = memo(function CanvasMarker({
+  loc, dimmed,
+}: { loc: Location; dimmed: boolean }) {
+  if (!loc.latLng) return null;
+  const color = statusColor(loc.progressStatus);
+  const isSub = loc.locationType === "Substation" || loc.locationType === "HV Station";
+  return (
+    <CircleMarker
+      center={loc.latLng}
+      radius={isSub ? 7 : 5}
+      renderer={canvasRenderer}
+      pathOptions={{
+        color,
+        fillColor: color,
+        fillOpacity: dimmed ? 0.15 : (loc.progressStatus === "Excluded" ? 0.25 : 0.85),
+        weight: dimmed ? 0.5 : 1.5,
+      }}
+    >
+      <Popup maxWidth={280}><LocationPopup loc={loc} /></Popup>
+    </CircleMarker>
   );
 });
 
@@ -153,7 +194,15 @@ const VesselMarker = memo(function VesselMarker({ v }: { v: VesselDef }) {
   );
 });
 
-function Legend({ showVessels, onToggleVessels }: { showVessels: boolean; onToggleVessels: () => void }) {
+/* ─── Legend + vessel toggle ─────────────────────────── */
+
+function Legend({
+  showVessels, onToggleVessels, selectedDate,
+}: {
+  showVessels: boolean;
+  onToggleVessels: () => void;
+  selectedDate: Date | null;
+}) {
   const items = [
     { label: "Completed",   color: "#22c55e" },
     { label: "In Progress", color: "#52A8EC" },
@@ -162,11 +211,19 @@ function Legend({ showVessels, onToggleVessels }: { showVessels: boolean; onTogg
   ];
   return (
     <>
-      <div className="leaflet-bottom leaflet-right" style={{ pointerEvents: "none", zIndex: 1000 }}>
+      <div className="leaflet-bottom leaflet-right" style={{ zIndex: 1000, pointerEvents: "none" }}>
         <div
           className="leaflet-control m-3 px-3 py-2 rounded text-xs"
           style={{ background: "rgba(12,60,96,0.92)", border: "1px solid rgba(255,255,255,0.12)" }}
         >
+          {selectedDate && (
+            <div
+              className="text-[9px] font-medium mb-1.5 pb-1.5 border-b"
+              style={{ color: "#ffc832", borderColor: "rgba(255,200,50,0.2)" }}
+            >
+              {selectedDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+            </div>
+          )}
           {items.map(({ label, color }) => (
             <div key={label} className="flex items-center gap-2 py-0.5">
               <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: color }} />
@@ -176,7 +233,7 @@ function Legend({ showVessels, onToggleVessels }: { showVessels: boolean; onTogg
         </div>
       </div>
 
-      <div className="leaflet-bottom leaflet-left" style={{ pointerEvents: "auto", zIndex: 1000 }}>
+      <div className="leaflet-bottom leaflet-left" style={{ zIndex: 1000, pointerEvents: "auto" }}>
         <div className="leaflet-control m-3">
           <button
             onClick={onToggleVessels}
@@ -198,21 +255,46 @@ function Legend({ showVessels, onToggleVessels }: { showVessels: boolean; onTogg
   );
 }
 
+/* ─── Main MapView ───────────────────────────────────── */
+
 export default memo(function MapView() {
-  const { locations, isLoading } = useSheetData();
-  const { activeTab } = useMapTab();
+  const { locations, campaigns, isLoading } = useSheetData();
+  const { activeTab, selectedDate } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
+  const [mapZoom, setMapZoom] = useState(ZOOM);
   const toggleVessels = useCallback(() => setShowVessels((v) => !v), []);
 
   const showExportOnly = activeTab === "export";
 
+  /* Filter locations by active tab */
   const mappable = useMemo(() => {
     const withPos = locations.filter((l) => l.latLng !== null);
     if (showExportOnly) return [];
     if (activeTab === "all") return withPos;
-    return withPos.filter((l) => l.primarySubStation === activeTab || l.primarySubStation.includes(activeTab));
+    return withPos.filter(
+      (l) => l.primarySubStation === activeTab || l.primarySubStation.includes(activeTab),
+    );
   }, [locations, activeTab, showExportOnly]);
 
+  /* Dim set: when a date is selected and falls in a campaign, dim non-active turbines */
+  const dimmedIds = useMemo(() => {
+    if (!selectedDate) return new Set<string>();
+    const inCampaign = campaigns.some(
+      (c) =>
+        c.startDate &&
+        c.endDate &&
+        selectedDate >= c.startDate &&
+        selectedDate <= c.endDate,
+    );
+    if (!inCampaign) return new Set<string>();
+    return new Set(
+      mappable
+        .filter((l) => l.progressStatus === "New" || l.progressStatus === "Excluded")
+        .map((l) => l.locationId || l.name),
+    );
+  }, [selectedDate, campaigns, mappable]);
+
+  /* Inter-array cable polylines */
   const cablePolylines = useMemo(() => {
     if (showExportOnly) return [];
     const stringMap = new Map<string, Location[]>();
@@ -235,6 +317,8 @@ export default memo(function MapView() {
       .filter((g) => g.points.length >= 2);
   }, [mappable, showExportOnly]);
 
+  const useCanvas = mapZoom < CANVAS_ZOOM_THRESHOLD;
+
   return (
     <div className="relative flex-1 h-full">
       <MapContainer
@@ -245,8 +329,9 @@ export default memo(function MapView() {
         preferCanvas={false}
       >
         <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} maxZoom={19} />
+        <ZoomTracker onChange={setMapZoom} />
 
-        {/* Inter-array cables */}
+        {/* Inter-array cables (rendered below markers) */}
         {cablePolylines.map(({ stringId, points }) => (
           <Polyline
             key={`iac-${stringId}`}
@@ -261,17 +346,31 @@ export default memo(function MapView() {
           pathOptions={{ color: "#6b7280", weight: 3, opacity: 0.8, dashArray: "6 4" }}
         />
 
-        {/* Turbine markers */}
-        {mappable.map((loc) => (
-          <TurbineMarker key={loc.locationId || loc.name} loc={loc} />
-        ))}
+        {/* Turbine markers — canvas fallback at low zoom */}
+        {useCanvas
+          ? mappable.map((loc) => (
+              <CanvasMarker
+                key={loc.locationId || loc.name}
+                loc={loc}
+                dimmed={dimmedIds.has(loc.locationId || loc.name)}
+              />
+            ))
+          : mappable.map((loc) => (
+              <TurbineMarker
+                key={loc.locationId || loc.name}
+                loc={loc}
+                dimmed={dimmedIds.has(loc.locationId || loc.name)}
+              />
+            ))}
 
         {/* Vessel markers */}
-        {showVessels && VESSELS.map((v) => (
-          <VesselMarker key={v.id} v={v} />
-        ))}
+        {showVessels && VESSELS.map((v) => <VesselMarker key={v.id} v={v} />)}
 
-        <Legend showVessels={showVessels} onToggleVessels={toggleVessels} />
+        <Legend
+          showVessels={showVessels}
+          onToggleVessels={toggleVessels}
+          selectedDate={selectedDate}
+        />
       </MapContainer>
 
       {isLoading && (
