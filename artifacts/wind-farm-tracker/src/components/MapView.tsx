@@ -429,11 +429,30 @@ export default memo(function MapView() {
       if (loc.primarySubStation) ospByKey.set(loc.primarySubStation, loc);
     }
 
-    /* Helper: resolve a node name to a Location, trying OSP fallbacks */
-    const resolveNode = (nodeName: string): Location | undefined =>
-      locationByName.get(nodeName) ??
-      ospByKey.get(nodeName) ??
-      ospByKey.get(nodeName.toLowerCase().trim());
+    /* Helper: resolve a node name to a Location, trying OSP fallbacks.
+     * 1. Exact match via locationByName (fastest path)
+     * 2. Exact match via ospByKey (catches primarySubStation-keyed entries)
+     * 3. Lowercase-trimmed exact match (handles casing/whitespace differences)
+     * 4. Substring scan across all substations — handles prefix/trailing-text
+     *    variants where the Cable sheet says "T1L11" but the Location sheet
+     *    stores "T1L11 Offshore Substation" (or vice-versa).
+     */
+    const ospEntries = Array.from(locationByName.values()).filter(
+      (l) => IS_SUBSTATION(l.locationType) && l.latLng,
+    );
+    const resolveNode = (nodeName: string): Location | undefined => {
+      const normalized = nodeName.toLowerCase().trim();
+      return (
+        locationByName.get(nodeName) ??
+        ospByKey.get(nodeName) ??
+        ospByKey.get(normalized) ??
+        ospEntries.find(
+          (l) =>
+            l.name.toLowerCase().includes(normalized) ||
+            normalized.includes(l.name.toLowerCase().trim()),
+        )
+      );
+    };
 
     /* ── Group cables by stringLink ── */
     const cablesByString = new Map<string, typeof cables>();
@@ -598,6 +617,10 @@ export default memo(function MapView() {
       (l) => IS_SUBSTATION(l.locationType) && l.latLng,
     );
     if (substations.length === 0) {
+      console.warn(
+        "[MapView] No substation with a lat/lng found — export cable is using the hardcoded fallback route. " +
+        "Check that the Location sheet has at least one row with a Substation locationType and valid coordinates.",
+      );
       const fallbackStart: [number, number] = [36.972, -75.519];
       return [{ key: "export-default", pts: [fallbackStart, ...EXPORT_MID] }];
     }
