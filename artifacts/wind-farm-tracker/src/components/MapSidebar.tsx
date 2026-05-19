@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, Activity, CalendarRange, Layers, BarChart3, 
 const ProgressView  = lazy(() => import("./ProgressView"));
 const TimelineView  = lazy(() => import("./TimelineView"));
 const SummaryView   = lazy(() => import("./SummaryView"));
+const GanttView     = lazy(() => import("./GanttView"));
 
 type Tab = "progress" | "timeline" | "heatmap" | "gantt" | "summary";
 
@@ -104,7 +105,7 @@ export default memo(function MapSidebar() {
           {activeTab === "progress" && <ProgressView />}
           {activeTab === "timeline" && <TimelineView />}
           {activeTab === "heatmap"  && <ComingSoon label="Heatmap" />}
-          {activeTab === "gantt"    && <ComingSoon label="Gantt" />}
+          {activeTab === "gantt"    && <GanttView />}
           {activeTab === "summary"  && <SummaryView />}
         </Suspense>
       </div>
