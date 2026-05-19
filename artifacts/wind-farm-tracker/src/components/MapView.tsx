@@ -1,13 +1,14 @@
 import { memo, useMemo, useState, useCallback } from "react";
 import {
-  MapContainer, TileLayer, Popup,
-  Polyline, Marker, CircleMarker, useMapEvents,
+  MapContainer, TileLayer, Popup, Tooltip,
+  Polyline, Marker, CircleMarker, ImageOverlay, useMapEvents,
 } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { useQuery } from "@tanstack/react-query";
 import { useSheetData } from "@/context/SheetDataContext";
 import { useMapTab } from "@/context/MapTabContext";
-import { statusColor } from "@/lib/types";
+import { statusColor, STATUS_COLORS } from "@/lib/types";
 import type { Location } from "@/lib/types";
 
 const CVOW_CENTER: [number, number] = [36.87, -75.50];
@@ -20,23 +21,37 @@ const TILE_ATTRIBUTION =
 
 const canvasRenderer = L.canvas({ padding: 0.5 });
 
-/* Virginia Beach landfall waypoint — the export cable converges here */
-const VB_LANDFALL: [number, number] = [36.918, -75.995];
-
-/* Intermediate waypoints between farm and shore */
-const EXPORT_MID: [number, number][] = [
-  [36.968, -75.556],
-  [36.962, -75.610],
-  [36.954, -75.668],
-  [36.945, -75.730],
-  [36.937, -75.790],
-  [36.930, -75.850],
-  [36.924, -75.910],
-  [36.920, -75.960],
-  VB_LANDFALL,
+/* ─── OSS image overlay bounds (from original map.js) ── */
+const OSS_OVERLAYS: { oss: string; bounds: [[number,number],[number,number]] }[] = [
+  { oss: "T1L11", bounds: [[36.853722, -75.345648], [36.854525, -75.345030]] },
+  { oss: "T2G07", bounds: [[36.915232, -75.415777], [36.916025, -75.415153]] },
+  { oss: "T3G15", bounds: [[36.915588, -75.291279], [36.916407, -75.290700]] },
 ];
 
-/* Stable per-string colour palette (12 colours, wraps for large arrays) */
+/* ─── GeoJSON cable feature types ───────────────────── */
+
+interface CableGeoFeature {
+  type: "Feature";
+  properties: {
+    ID: number;
+    String: string;
+    OSS: string;
+    "WTG from": string;
+    "WTG to": string;
+    "Cable type": string;
+    "Cable ID": string;
+  };
+  geometry: { type: "LineString"; coordinates: [number, number][] };
+}
+
+interface ExportCableFeature {
+  type: "Feature";
+  properties: { id: number | null; oss: string; name: string };
+  geometry: { type: "MultiLineString"; coordinates: [number, number][][] };
+}
+
+/* ─── Stable per-string colour palette ──────────────── */
+
 const STRING_COLORS = [
   "#4e9af1", "#34c88a", "#f4b942", "#b87cf5",
   "#f97316", "#14b8a6", "#ec4899", "#22d3ee",
@@ -59,10 +74,13 @@ interface CableSeg {
   pts: [number, number][];
   color: string;
   kind: "inter-array" | "string-feeder";
+  meta?: { from: string; to: string; type: string; string: string; oss: string };
 }
 
 const IS_SUBSTATION = (lt: string) =>
   lt === "Substation" || lt === "HV Station" || lt === "Offshore Substation";
+
+const OSS_NAMES = new Set(["T1L11", "T2G07", "T3G15"]);
 
 /* ─── Vessel definitions ─────────────────────────────── */
 
@@ -97,42 +115,101 @@ const VESSELS: VesselDef[] = [
   { id: 20, pos: [37.010, -75.110], hdg: 230, name: "VOS SWEET",           type: "Service" },
 ];
 
-/* ─── Icon factories ─────────────────────────────────── */
+/* ─── Enhanced turbine icon with status ring ─────────── */
 
-function createTurbineIcon(status: string, isSubstation: boolean, label: string): L.DivIcon {
+function createTurbineIcon(
+  status: string,
+  isSubstation: boolean,
+  label: string,
+): L.DivIcon {
   const color = statusColor(status);
-  const size = isSubstation ? 32 : 22;
+  const size = isSubstation ? 38 : 26;
   const c = size / 2;
-  const r = c - 1.5;
-  const bladeEnd = -(r - 5);
-  const labelY = size + 9;
-  const totalH = size + 12;
+  const ringR = c - 2;
+  const ringW = isSubstation ? 4.5 : 3.5;
+  const innerR = ringR - ringW - 1;
+  const bladeEnd = -(innerR - 2.5);
+  const labelY = size + 10;
+  const totalH = size + 13;
 
-  const html = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${totalH}" viewBox="0 0 ${size} ${totalH}">
-    <circle cx="${c}" cy="${c}" r="${r}" fill="#cfd4da" stroke="${color}" stroke-width="2.2"/>
-    <g transform="translate(${c},${c})" opacity="0.52">
-      <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round"/>
-      <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round" transform="rotate(120)"/>
-      <line x1="0" y1="${bladeEnd}" x2="0" y2="-2.5" stroke="#455060" stroke-width="1.4" stroke-linecap="round" transform="rotate(240)"/>
+  const circ = 2 * Math.PI * ringR;
+
+  /* Status ring fill amount */
+  let ringFrac = 0;
+  let trackOpacity = "0.14";
+  if (status === "Completed") {
+    ringFrac = 1;
+    trackOpacity = "0.08";
+  } else if (status === "In Progress") {
+    ringFrac = 0.62;
+    trackOpacity = "0.14";
+  } else if (status === "New") {
+    ringFrac = 0.22;
+    trackOpacity = "0.18";
+  } else {
+    ringFrac = 0.08;
+    trackOpacity = "0.22";
+  }
+
+  const filled = ringFrac * circ;
+  const empty  = circ - filled;
+  const bladeW = isSubstation ? 1.4 : 1.2;
+
+  const html = `<svg xmlns="http://www.w3.org/2000/svg"
+      width="${size}" height="${totalH}" viewBox="0 0 ${size} ${totalH}">
+    <!-- dark backing disc -->
+    <circle cx="${c}" cy="${c}" r="${ringR}"
+      fill="rgba(10,30,50,0.82)"
+      stroke="rgba(255,255,255,0.07)" stroke-width="0.6"/>
+    <!-- ring track -->
+    <circle cx="${c}" cy="${c}" r="${ringR}"
+      fill="none" stroke="rgba(255,255,255,${trackOpacity})"
+      stroke-width="${ringW}"
+      transform="rotate(-90 ${c} ${c})"/>
+    <!-- ring filled arc -->
+    <circle cx="${c}" cy="${c}" r="${ringR}"
+      fill="none" stroke="${color}" stroke-width="${ringW}"
+      stroke-dasharray="${filled.toFixed(2)} ${empty.toFixed(2)}"
+      stroke-linecap="butt"
+      transform="rotate(-90 ${c} ${c})"/>
+    <!-- blades -->
+    <g transform="translate(${c},${c})">
+      <line x1="0" y1="${bladeEnd.toFixed(2)}" x2="0" y2="-2"
+        stroke="${color}" stroke-width="${bladeW}" stroke-linecap="round" opacity="0.65"/>
+      <line x1="0" y1="${bladeEnd.toFixed(2)}" x2="0" y2="-2"
+        stroke="${color}" stroke-width="${bladeW}" stroke-linecap="round" opacity="0.65"
+        transform="rotate(120)"/>
+      <line x1="0" y1="${bladeEnd.toFixed(2)}" x2="0" y2="-2"
+        stroke="${color}" stroke-width="${bladeW}" stroke-linecap="round" opacity="0.65"
+        transform="rotate(240)"/>
     </g>
-    <circle cx="${c}" cy="${c}" r="2.4" fill="#455060" opacity="0.9"/>
-    <text x="${c}" y="${labelY}" text-anchor="middle"
-      font-size="${isSubstation ? 8 : 7}" font-family="Poppins,Arial,sans-serif"
-      fill="#2c3e50" font-weight="600" letter-spacing="0.2">${label}</text>
+    <!-- hub -->
+    <circle cx="${c}" cy="${c}" r="2.2" fill="${color}" opacity="0.92"/>
+    <!-- label -->
+    <text x="${c}" y="${labelY}"
+      text-anchor="middle"
+      font-size="${isSubstation ? 8 : 6.5}"
+      font-family="Poppins,Arial,sans-serif"
+      fill="${isSubstation ? "#e2eaf2" : "#8ba8c0"}"
+      font-weight="${isSubstation ? 700 : 600}"
+      letter-spacing="0.2">${label}</text>
   </svg>`;
 
   return L.divIcon({
     html,
     className: "",
-    iconSize: [size, totalH],
-    iconAnchor: [c, c],
+    iconSize:    [size, totalH],
+    iconAnchor:  [c, c],
     popupAnchor: [0, -(c + 2)],
   });
 }
 
 function createVesselIcon(hdg: number): L.DivIcon {
-  const html = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="17" viewBox="0 0 13 17" style="transform:rotate(${hdg}deg);transform-origin:6.5px 8.5px;display:block">
-    <polygon points="6.5,1 12,15 6.5,11.5 1,15" fill="#3d5a9e" stroke="rgba(255,255,255,0.7)" stroke-width="0.6" opacity="0.92"/>
+  const html = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="17"
+    viewBox="0 0 13 17"
+    style="transform:rotate(${hdg}deg);transform-origin:6.5px 8.5px;display:block">
+    <polygon points="6.5,1 12,15 6.5,11.5 1,15"
+      fill="#3d5a9e" stroke="rgba(255,255,255,0.7)" stroke-width="0.6" opacity="0.92"/>
   </svg>`;
   return L.divIcon({ html, className: "", iconSize: [13, 17], iconAnchor: [6, 8] });
 }
@@ -231,21 +308,30 @@ const VesselMarker = memo(function VesselMarker({ v }: { v: VesselDef }) {
   );
 });
 
-/* ─── Legend + vessel toggle ─────────────────────────── */
+/* ─── Cable type filter + legend ────────────────────── */
+
+const CABLE_TYPE_COLORS: Record<string, string> = {
+  "630mm": "#52A8EC",
+  "240mm": "#f4b942",
+};
 
 function Legend({
   showVessels, onToggleVessels, selectedDate,
+  activeCableTypes, onToggleCableType,
 }: {
   showVessels: boolean;
   onToggleVessels: () => void;
   selectedDate: Date | null;
+  activeCableTypes: Set<string>;
+  onToggleCableType: (t: string) => void;
 }) {
-  const items = [
-    { label: "Completed",   color: "#22c55e" },
-    { label: "In Progress", color: "#52A8EC" },
-    { label: "New",         color: "#94a3b8" },
-    { label: "Excluded",    color: "#9ca3af" },
+  const statusItems = [
+    { label: "Completed",   color: STATUS_COLORS["Completed"] },
+    { label: "In Progress", color: STATUS_COLORS["In Progress"] },
+    { label: "New",         color: STATUS_COLORS["New"] },
+    { label: "Excluded",    color: STATUS_COLORS["Excluded"] },
   ];
+
   return (
     <>
       <div className="leaflet-bottom leaflet-right" style={{ zIndex: 1000, pointerEvents: "none" }}>
@@ -261,12 +347,14 @@ function Legend({
               {selectedDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
             </div>
           )}
-          {items.map(({ label, color }) => (
+          {statusItems.map(({ label, color }) => (
             <div key={label} className="flex items-center gap-2 py-0.5">
               <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: color }} />
               <span style={{ color: "#c8d4e0" }}>{label}</span>
             </div>
           ))}
+
+          {/* Cable line types */}
           <div className="mt-2 pt-2 border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
             <div className="flex items-center gap-2 py-0.5">
               <svg width="24" height="4" style={{ flexShrink: 0 }}>
@@ -292,7 +380,8 @@ function Legend({
       </div>
 
       <div className="leaflet-bottom leaflet-left" style={{ zIndex: 1000, pointerEvents: "auto" }}>
-        <div className="leaflet-control m-3">
+        <div className="leaflet-control m-3 flex flex-col gap-1.5">
+          {/* Vessel toggle */}
           <button
             onClick={onToggleVessels}
             className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded transition-all"
@@ -307,6 +396,35 @@ function Legend({
             </svg>
             Vessels
           </button>
+
+          {/* Cable type filters */}
+          <div
+            className="px-2.5 py-2 rounded"
+            style={{ background: "rgba(12,60,96,0.88)", border: "1px solid rgba(255,255,255,0.10)" }}
+          >
+            <div className="text-[9px] font-semibold uppercase tracking-wider mb-1.5"
+              style={{ color: "#8ba8c0" }}>Cable type</div>
+            {Object.keys(CABLE_TYPE_COLORS).map((t) => {
+              const active = activeCableTypes.has(t);
+              const color  = CABLE_TYPE_COLORS[t];
+              return (
+                <button
+                  key={t}
+                  onClick={() => onToggleCableType(t)}
+                  className="flex items-center gap-2 w-full py-0.5 text-left"
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-sm flex-shrink-0 transition-opacity"
+                    style={{ background: color, opacity: active ? 1 : 0.25 }}
+                  />
+                  <span
+                    className="text-[10px] transition-colors"
+                    style={{ color: active ? "#c8d4e0" : "#4a6880" }}
+                  >{t}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
     </>
@@ -316,11 +434,47 @@ function Legend({
 /* ─── Main MapView ───────────────────────────────────── */
 
 export default memo(function MapView() {
-  const { locations, campaigns, cables, stringDefs, locationByName, isLoading } = useSheetData();
+  const { locations, campaigns, isLoading } = useSheetData();
   const { activeTab, selectedDate, selectedString } = useMapTab();
   const [showVessels, setShowVessels] = useState(true);
   const [mapZoom, setMapZoom] = useState(ZOOM);
+  const [activeCableTypes, setActiveCableTypes] = useState<Set<string>>(
+    () => new Set(Object.keys(CABLE_TYPE_COLORS)),
+  );
   const toggleVessels = useCallback(() => setShowVessels((v) => !v), []);
+  const toggleCableType = useCallback((t: string) => {
+    setActiveCableTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
+      return next;
+    });
+  }, []);
+
+  /* Lazy-load real cable GeoJSON (cached forever — static asset) */
+  const cableGeoQuery = useQuery<CableGeoFeature[]>({
+    queryKey: ["geo", "cables"],
+    queryFn: async () => {
+      const res = await fetch("/cables.geojson");
+      if (!res.ok) throw new Error("Failed to load cables.geojson");
+      const data = await res.json() as { features: CableGeoFeature[] };
+      return data.features;
+    },
+    staleTime: Infinity,
+    gcTime:    Infinity,
+  });
+
+  const exportGeoQuery = useQuery<ExportCableFeature[]>({
+    queryKey: ["geo", "export-cables"],
+    queryFn: async () => {
+      const res = await fetch("/export_cables.geojson");
+      if (!res.ok) throw new Error("Failed to load export_cables.geojson");
+      const data = await res.json() as { features: ExportCableFeature[] };
+      return data.features;
+    },
+    staleTime: Infinity,
+    gcTime:    Infinity,
+  });
 
   const showExportOnly = activeTab === "export";
 
@@ -340,7 +494,7 @@ export default memo(function MapView() {
     return filtered;
   }, [locations, activeTab, showExportOnly, selectedString]);
 
-  /* Campaign-date driven dim set (unchanged) */
+  /* Campaign-date driven dim set */
   const dimmedIds = useMemo(() => {
     if (!selectedDate || !mappable.length) return new Set<string>();
 
@@ -380,20 +534,12 @@ export default memo(function MapView() {
     );
   }, [selectedDate, campaigns, mappable]);
 
-  /**
-   * Cable polylines — one multi-segment Polyline per string, built by
-   * walking the Cable sheet topology chain (Location_A → Location_B) starting
-   * from each string's String_Starting_Location.
-   *
-   * For each string:
-   *   1. Collect all cables whose stringLink matches.
-   *   2. Build a bidirectional adjacency map between location names.
-   *   3. Walk from startingLocation, always moving to the unvisited neighbour.
-   *   4. When the next node is a substation, emit the path so far as the
-   *      inter-array polyline and the final edge as the string-feeder.
-   *
-   * Falls back to orderOfMarch-ordered multi-point polylines per string when
-   * the Cable topology produces nothing (e.g. data not yet loaded).
+  /* ── Cable polylines — from real GeoJSON geometry ──────────────────────
+   * Each cable feature in cables.geojson carries LineString geometry with
+   * the actual GPS waypoints surveyed for that cable segment.
+   * - Features where "WTG from" = OSS name are string feeders (thicker).
+   * - All others are inter-array cables.
+   * Filtered by activeTab (OSS) and selectedString, cable type toggles.
    */
   const { interArray, stringFeeder } = useMemo((): {
     interArray: CableSeg[];
@@ -401,234 +547,79 @@ export default memo(function MapView() {
   } => {
     if (showExportOnly) return { interArray: [], stringFeeder: [] };
 
+    const features = cableGeoQuery.data ?? [];
     const ia: CableSeg[] = [];
     const sf: CableSeg[] = [];
 
-    /* ── Build lookup: stringName → StringDef ── */
-    const stringDefByName = new Map<string, { startingLocation: string }>();
-    for (const sd of stringDefs) {
-      if (sd.stringName) stringDefByName.set(sd.stringName, sd);
-    }
+    for (const f of features) {
+      const props = f.properties;
 
-    /* ── Build OSP lookup ──────────────────────────────────────────────────
-     * The Cable sheet may reference the OSP under a slightly different name
-     * than what the Location sheet stores in `name`. Index every substation
-     * with latLng by:
-     *   1. Its exact `name` (already in locationByName, but included here for
-     *      consistency)
-     *   2. Its name lowercased + trimmed
-     *   3. Its `primarySubStation` value (turbines store this; the OSP that
-     *      "owns" a group of strings is reliably identified this way)
-     * This lets the chain-walk find the OSP even under name mismatches.
-     */
-    const ospByKey = new Map<string, Location>();
-    for (const [name, loc] of locationByName) {
-      if (!IS_SUBSTATION(loc.locationType) || !loc.latLng) continue;
-      ospByKey.set(name, loc);
-      ospByKey.set(name.toLowerCase().trim(), loc);
-      if (loc.primarySubStation) ospByKey.set(loc.primarySubStation, loc);
-    }
+      /* Tab filter */
+      if (activeTab !== "all" && props.OSS !== activeTab) continue;
 
-    /* Helper: resolve a node name to a Location, trying OSP fallbacks.
-     * 1. Exact match via locationByName (fastest path)
-     * 2. Exact match via ospByKey (catches primarySubStation-keyed entries)
-     * 3. Lowercase-trimmed exact match (handles casing/whitespace differences)
-     * 4. Substring scan across all substations — handles prefix/trailing-text
-     *    variants where the Cable sheet says "T1L11" but the Location sheet
-     *    stores "T1L11 Offshore Substation" (or vice-versa).
-     */
-    const ospEntries = Array.from(locationByName.values()).filter(
-      (l) => IS_SUBSTATION(l.locationType) && l.latLng,
-    );
-    const resolveNode = (nodeName: string): Location | undefined => {
-      const normalized = nodeName.toLowerCase().trim();
-      return (
-        locationByName.get(nodeName) ??
-        ospByKey.get(nodeName) ??
-        ospByKey.get(normalized) ??
-        ospEntries.find(
-          (l) =>
-            l.name.toLowerCase().includes(normalized) ||
-            normalized.includes(l.name.toLowerCase().trim()),
-        )
+      /* String filter */
+      if (selectedString && props.String !== selectedString) continue;
+
+      /* Cable type filter */
+      if (!activeCableTypes.has(props["Cable type"])) continue;
+
+      /* Convert [lng, lat] → [lat, lng] for Leaflet */
+      const pts = f.geometry.coordinates.map(
+        ([lng, lat]) => [lat, lng] as [number, number],
       );
-    };
+      if (pts.length < 2) continue;
 
-    /* ── Group cables by stringLink ── */
-    const cablesByString = new Map<string, typeof cables>();
-    for (const cable of cables) {
-      if (!cable.stringLink) continue;
-      const arr = cablesByString.get(cable.stringLink) ?? [];
-      arr.push(cable);
-      cablesByString.set(cable.stringLink, arr);
-    }
+      const color = stringColorMap.get(props.String) ?? "#6b8aad";
+      const isFeeder = OSS_NAMES.has(props["WTG from"]);
+      const meta = {
+        from: props["WTG from"],
+        to:   props["WTG to"],
+        type: props["Cable type"],
+        string: props.String,
+        oss:  props.OSS,
+      };
 
-    /* ── Distinct strings present in the visible mappable set ── */
-    const visibleStrings = Array.from(
-      new Set(mappable.filter((l) => l.string && !IS_SUBSTATION(l.locationType)).map((l) => l.string)),
-    );
-
-    let topologyResolved = 0;
-
-    for (const stringName of visibleStrings) {
-      const color = stringColorMap.get(stringName) ?? "#6b8aad";
-      const stringCables = cablesByString.get(stringName) ?? [];
-      if (stringCables.length === 0) continue;
-
-      /* Build bidirectional adjacency for this string's cables */
-      const adj = new Map<string, string[]>();
-      for (const cable of stringCables) {
-        if (!cable.locationA || !cable.locationB) continue;
-        const aNeighbours = adj.get(cable.locationA) ?? [];
-        aNeighbours.push(cable.locationB);
-        adj.set(cable.locationA, aNeighbours);
-
-        const bNeighbours = adj.get(cable.locationB) ?? [];
-        bNeighbours.push(cable.locationA);
-        adj.set(cable.locationB, bNeighbours);
-      }
-
-      /* Determine walk start: prefer StringDef.startingLocation, else any
-         non-OSP node in the adjacency that has only one neighbour */
-      const sdStart = stringDefByName.get(stringName)?.startingLocation;
-      let walkStart: string | undefined = sdStart && adj.has(sdStart) ? sdStart : undefined;
-      if (!walkStart) {
-        for (const [node, neighbours] of adj) {
-          // Prefer endpoint that is NOT an OSP so we walk turbine→OSP, not OSP→turbine
-          if (neighbours.length === 1 && !ospByKey.has(node)) { walkStart = node; break; }
-        }
-      }
-      if (!walkStart) {
-        // Last resort: any single-neighbour node
-        for (const [node, neighbours] of adj) {
-          if (neighbours.length === 1) { walkStart = node; break; }
-        }
-      }
-      if (!walkStart) continue;
-
-      /* Walk the chain */
-      const visited = new Set<string>();
-      let current = walkStart;
-      visited.add(current);
-
-      const interPts: [number, number][] = [];
-      const startLoc = resolveNode(current);
-      if (startLoc?.latLng) interPts.push(startLoc.latLng);
-
-      const MAX_ITER = 200;
-      let iter = 0;
-      let feederEmitted = false;
-
-      while (iter++ < MAX_ITER) {
-        const neighbours = adj.get(current) ?? [];
-        const next = neighbours.find((n) => !visited.has(n));
-        if (!next) break;
-
-        visited.add(next);
-        const nextLoc = resolveNode(next);
-        if (!nextLoc?.latLng) { current = next; continue; }
-
-        if (IS_SUBSTATION(nextLoc.locationType)) {
-          /* Chain terminates at OSP — emit string-feeder from last turbine */
-          const lastPt = interPts[interPts.length - 1];
-          if (lastPt) {
-            sf.push({
-              key: `sf-${stringName}`,
-              pts: [lastPt, nextLoc.latLng],
-              color,
-              kind: "string-feeder",
-            });
-            feederEmitted = true;
-          }
-          break;
-        }
-
-        interPts.push(nextLoc.latLng);
-        current = next;
-      }
-
-      if (interPts.length >= 2) {
-        ia.push({ key: `ia-${stringName}`, pts: interPts, color, kind: "inter-array" });
-        topologyResolved++;
-
-        /* ── Post-walk feeder fallback ─────────────────────────────────────
-         * If the topology walk built inter-array points but never hit the OSP
-         * (e.g. the Cable sheet doesn't include the feeder row, or the OSP
-         * name couldn't be resolved during the walk), use the turbine's own
-         * `primarySubStation` field — which explicitly names its OSP — to
-         * look up the substation lat/lng and draw the missing feeder segment.
-         */
-        if (!feederEmitted) {
-          const repTurbine = mappable.find(
-            (l) => l.string === stringName && !IS_SUBSTATION(l.locationType),
-          );
-          if (repTurbine?.primarySubStation) {
-            const osp =
-              ospByKey.get(repTurbine.primarySubStation) ??
-              ospByKey.get(repTurbine.primarySubStation.toLowerCase().trim());
-            if (osp?.latLng) {
-              const lastPt = interPts[interPts.length - 1];
-              sf.push({
-                key: `sf-${stringName}`,
-                pts: [lastPt, osp.latLng],
-                color,
-                kind: "string-feeder",
-              });
-            }
-          }
-        }
-      }
-    }
-
-    /**
-     * Fallback — fires only when the topology walk produced nothing
-     * (cables not yet loaded / all stringLink values missing).
-     * Builds one multi-point Polyline per string sorted by orderOfMarch.
-     */
-    if (topologyResolved === 0) {
-      const stringMap = new Map<string, Location[]>();
-      for (const loc of mappable) {
-        if (!loc.string || !loc.latLng || IS_SUBSTATION(loc.locationType)) continue;
-        const arr = stringMap.get(loc.string) ?? [];
-        arr.push(loc);
-        stringMap.set(loc.string, arr);
-      }
-      for (const [sid, locs] of stringMap) {
-        const sorted = [...locs].sort(
-          (a, b) => (parseFloat(a.orderOfMarch) || 0) - (parseFloat(b.orderOfMarch) || 0),
-        );
-        const color = stringColorMap.get(sid) ?? "#6b8aad";
-        const pts = sorted.filter((l) => l.latLng).map((l) => l.latLng as [number, number]);
-        if (pts.length >= 2) ia.push({ key: `fb-${sid}`, pts, color, kind: "inter-array" });
+      if (isFeeder) {
+        sf.push({ key: props["Cable ID"], pts, color, kind: "string-feeder", meta });
+      } else {
+        ia.push({ key: props["Cable ID"], pts, color, kind: "inter-array", meta });
       }
     }
 
     return { interArray: ia, stringFeeder: sf };
-  }, [cables, stringDefs, mappable, locationByName, stringColorMap, showExportOnly]);
+  }, [cableGeoQuery.data, activeTab, selectedString, showExportOnly, stringColorMap, activeCableTypes]);
 
-  /**
-   * Export cables — drawn from each substation's actual position.
-   * Resolves against the *full* locations array (not just the tab-filtered
-   * mappable set) so export cables always show on the export tab.
-   * Falls back to a single hardcoded route if no substation has a latLng.
-   */
-  const exportCables = useMemo(() => {
-    const substations = locations.filter(
-      (l) => IS_SUBSTATION(l.locationType) && l.latLng,
-    );
-    if (substations.length === 0) {
-      console.warn(
-        "[MapView] No substation with a lat/lng found — export cable is using the hardcoded fallback route. " +
-        "Check that the Location sheet has at least one row with a Substation locationType and valid coordinates.",
-      );
-      const fallbackStart: [number, number] = [36.972, -75.519];
-      return [{ key: "export-default", pts: [fallbackStart, ...EXPORT_MID] }];
+  /* ── Export cables — from real GeoJSON (MultiLineString geometry) ───── */
+  const exportCables = useMemo((): { key: string; pts: [number, number][] }[] => {
+    const features = exportGeoQuery.data ?? [];
+    if (features.length === 0) return [];
+
+    const result: { key: string; pts: [number, number][] }[] = [];
+
+    for (const f of features) {
+      /* Show all export cables when on "export" tab or "all"; filter by OSS otherwise */
+      if (activeTab !== "export" && activeTab !== "all") {
+        if (f.properties.oss !== activeTab) continue;
+      }
+
+      /* MultiLineString: coordinates = array of linestrings */
+      f.geometry.coordinates.forEach((line, i) => {
+        const pts = line.map(([lng, lat]) => [lat, lng] as [number, number]);
+        if (pts.length >= 2) {
+          result.push({ key: `export-${f.properties.name}-${i}`, pts });
+        }
+      });
     }
-    return substations.map((sub) => ({
-      key: `export-${sub.name}`,
-      pts: [sub.latLng!, ...EXPORT_MID] as [number, number][],
-    }));
-  }, [locations]);
+
+    return result;
+  }, [exportGeoQuery.data, activeTab]);
+
+  /* Which OSS image overlays to show */
+  const visibleOssOverlays = useMemo(() => {
+    if (showExportOnly) return [];
+    if (activeTab === "all") return OSS_OVERLAYS;
+    return OSS_OVERLAYS.filter((o) => o.oss === activeTab);
+  }, [activeTab, showExportOnly]);
 
   const useCanvas = mapZoom < CANVAS_ZOOM_THRESHOLD;
 
@@ -644,30 +635,61 @@ export default memo(function MapView() {
         <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} maxZoom={19} />
         <ZoomTracker onChange={setMapZoom} />
 
+        {/* OSS station image overlays */}
+        {visibleOssOverlays.map((o) => (
+          <ImageOverlay
+            key={o.oss}
+            url="/oss_station.png"
+            bounds={o.bounds}
+            opacity={0.88}
+            zIndex={10}
+          />
+        ))}
+
         {/* 1 · Inter-array cables — thin, per-string colour */}
-        {interArray.map(({ key, pts, color }) => (
+        {interArray.map(({ key, pts, color, meta }) => (
           <Polyline
             key={key}
             positions={pts}
-            pathOptions={{ color, weight: 1.5, opacity: 0.7 }}
-          />
+            pathOptions={{ color, weight: 1.5, opacity: 0.72 }}
+          >
+            {meta && (
+              <Tooltip sticky>
+                <div style={{ fontFamily: "Poppins,sans-serif", fontSize: 11, lineHeight: 1.5 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 2 }}>{key}</div>
+                  <div style={{ color: "#555" }}>{meta.from} → {meta.to}</div>
+                  <div style={{ color: "#555" }}>String {meta.string} · {meta.type} · {meta.oss}</div>
+                </div>
+              </Tooltip>
+            )}
+          </Polyline>
         ))}
 
-        {/* 2 · String-feeder cables — thicker, same per-string colour */}
-        {stringFeeder.map(({ key, pts, color }) => (
+        {/* 2 · String-feeder cables — thicker, per-string colour */}
+        {stringFeeder.map(({ key, pts, color, meta }) => (
           <Polyline
             key={key}
             positions={pts}
-            pathOptions={{ color, weight: 3, opacity: 0.9 }}
-          />
+            pathOptions={{ color, weight: 3.5, opacity: 0.9 }}
+          >
+            {meta && (
+              <Tooltip sticky>
+                <div style={{ fontFamily: "Poppins,sans-serif", fontSize: 11, lineHeight: 1.5 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 2 }}>{key}</div>
+                  <div style={{ color: "#555" }}>String feeder · {meta.from} → {meta.to}</div>
+                  <div style={{ color: "#555" }}>String {meta.string} · {meta.type} · {meta.oss}</div>
+                </div>
+              </Tooltip>
+            )}
+          </Polyline>
         ))}
 
-        {/* 3 · Export / main cables — thick dashed grey, one per substation */}
+        {/* 3 · Export cables — thick dashed grey, real GeoJSON geometry */}
         {exportCables.map(({ key, pts }) => (
           <Polyline
             key={key}
             positions={pts}
-            pathOptions={{ color: "#9ca3af", weight: 3, opacity: 0.8, dashArray: "7 5" }}
+            pathOptions={{ color: "#9ca3af", weight: 3, opacity: 0.82, dashArray: "7 5" }}
           />
         ))}
 
@@ -695,16 +717,19 @@ export default memo(function MapView() {
           showVessels={showVessels}
           onToggleVessels={toggleVessels}
           selectedDate={selectedDate}
+          activeCableTypes={activeCableTypes}
+          onToggleCableType={toggleCableType}
         />
       </MapContainer>
 
-      {isLoading && (
+      {/* Loading overlay (sheet data OR GeoJSON) */}
+      {(isLoading || cableGeoQuery.isLoading) && (
         <div className="absolute inset-0 flex items-end justify-center pb-6 pointer-events-none z-[999]">
           <div
             className="text-xs px-3 py-1.5 rounded-full"
             style={{ background: "rgba(12,60,96,0.92)", color: "#c8d4e0" }}
           >
-            Fetching live data…
+            {cableGeoQuery.isLoading ? "Loading cable geometry…" : "Fetching live data…"}
           </div>
         </div>
       )}
@@ -719,6 +744,11 @@ export default memo(function MapView() {
         }}
       >
         {mappable.length} locations · CVOW1
+        {cableGeoQuery.data && (
+          <span className="ml-1.5 opacity-60">
+            · {interArray.length + stringFeeder.length} cables
+          </span>
+        )}
       </div>
     </div>
   );
