@@ -1,0 +1,6 @@
+{
+  "buildCommand": "pnpm --filter @workspace/wind-farm-tracker run build",
+  "outputDirectory": "artifacts/wind-farm-tracker/dist",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "framework": null
+}
