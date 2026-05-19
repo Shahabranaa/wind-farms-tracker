@@ -2,22 +2,64 @@ import { memo, useMemo, useState, useCallback, useRef } from "react";
 import { useSheetData } from "@/context/SheetDataContext";
 import { useMapTab } from "@/context/MapTabContext";
 import { statusColor } from "@/lib/types";
-import type { StringGroup } from "@/lib/types";
+import type { StringGroup, Campaign } from "@/lib/types";
 
 const LABEL_W  = 108;
-const CHART_W  = 520;
 const ROW_H    = 26;
 const HEADER_H = 36;
 const GROUP_H  = 22;
 
 const OSS_ORDER = ["T1L11", "T2G07", "T3G15"];
 
-function fmtFull(d: Date) {
+function fmtShort(d: Date) {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
 }
 
 function fmtMonthYear(d: Date) {
   return d.toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
+}
+
+/* ── Campaign→String matching ────────────────────────── */
+
+/**
+ * Best-effort matching of a campaign to a string.
+ * Tries: (1) campaign name contains subStation, (2) campaign name contains stringId fragment.
+ * Falls back to the whole-project window (first campaign with valid dates).
+ */
+function assignCampaign(
+  g: StringGroup,
+  campaigns: Campaign[],
+  projectStart: Date,
+  projectEnd: Date,
+): { startDate: Date; endDate: Date; campaignName: string } {
+  const oss = g.subStation.toUpperCase();
+  const sid = g.stringId.toUpperCase();
+
+  // 1. Try to match by OSS name
+  const byOss = campaigns.find((c) => {
+    const cn = c.name.toUpperCase();
+    return c.startDate && c.endDate && (cn.includes(oss) || oss.includes(cn.slice(0, 4)));
+  });
+  if (byOss?.startDate && byOss?.endDate) {
+    return { startDate: byOss.startDate, endDate: byOss.endDate, campaignName: byOss.name };
+  }
+
+  // 2. Try to match by string ID fragment
+  const bySid = campaigns.find((c) => {
+    const cn = c.name.toUpperCase();
+    return c.startDate && c.endDate && (cn.includes(sid.slice(0, 3)));
+  });
+  if (bySid?.startDate && bySid?.endDate) {
+    return { startDate: bySid.startDate, endDate: bySid.endDate, campaignName: bySid.name };
+  }
+
+  // 3. Fall back to overall project window
+  const first = campaigns.find((c) => c.startDate && c.endDate);
+  return {
+    startDate: first?.startDate ?? projectStart,
+    endDate: first?.endDate ?? projectEnd,
+    campaignName: first?.name ?? "Project",
+  };
 }
 
 /* ── Tooltip ─────────────────────────────────────────── */
@@ -30,6 +72,9 @@ interface TooltipData {
   done: number;
   total: number;
   color: string;
+  campaignName: string;
+  startDate: Date;
+  endDate: Date;
 }
 
 function Tooltip({ data, x, y }: { data: TooltipData; x: number; y: number }) {
@@ -37,21 +82,35 @@ function Tooltip({ data, x, y }: { data: TooltipData; x: number; y: number }) {
     <div
       className="fixed z-50 pointer-events-none rounded shadow-xl text-xs"
       style={{
-        left: Math.min(x + 12, window.innerWidth - 180),
-        top: y - 8,
+        left: Math.min(x + 14, window.innerWidth - 200),
+        top: y - 10,
         background: "#0C3C60",
-        border: "1px solid rgba(82,168,236,0.35)",
-        padding: "6px 10px",
-        minWidth: 160,
+        border: "1px solid rgba(82,168,236,0.4)",
+        padding: "7px 11px",
+        minWidth: 175,
       }}
     >
-      <div className="font-semibold text-white mb-1">{data.stringId}</div>
-      <div className="flex items-center gap-1 mb-0.5">
+      <div className="font-bold text-white mb-1">{data.stringId}</div>
+      <div className="mb-1" style={{ color: "#8ba8c0" }}>
+        OSS: <span style={{ color: "#c8d8e8" }}>{data.oss}</span>
+      </div>
+      <div className="flex items-center gap-1 mb-1">
         <span style={{ color: data.color }}>●</span>
         <span style={{ color: data.color }}>{data.status}</span>
+        <span style={{ color: "#8ba8c0" }}>· {data.pct}%</span>
       </div>
-      <div style={{ color: "#8ba8c0" }}>{data.pct}% complete</div>
-      <div style={{ color: "#8ba8c0" }}>{data.done} / {data.total} locations</div>
+      <div style={{ color: "#8ba8c0" }}>
+        {data.done} / {data.total} locations done
+      </div>
+      <div
+        className="mt-1.5 pt-1.5"
+        style={{ borderTop: "1px solid rgba(255,255,255,0.1)", color: "#6b8fa8" }}
+      >
+        <div className="truncate">{data.campaignName}</div>
+        <div>
+          {fmtShort(data.startDate)} → {fmtShort(data.endDate)}
+        </div>
+      </div>
     </div>
   );
 }
@@ -64,6 +123,8 @@ const GanttRow = memo(function GanttRow({
   color,
   todayPct,
   tickPcts,
+  barLeftPct,
+  barWidthPct,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -72,10 +133,14 @@ const GanttRow = memo(function GanttRow({
   color: string;
   todayPct: number;
   tickPcts: number[];
-  onMouseEnter: (e: React.MouseEvent, data: TooltipData) => void;
+  barLeftPct: number;   // % position of campaign start within timeline
+  barWidthPct: number;  // % width of campaign window
+  onMouseEnter: (e: React.MouseEvent, g: StringGroup) => void;
   onMouseLeave: () => void;
 }) {
   const pct = group.progressPercent;
+  // The fill covers progressPercent of the campaign bar width
+  const fillWidthPx = `${pct}%`;
 
   return (
     <div
@@ -95,14 +160,11 @@ const GanttRow = memo(function GanttRow({
           borderRight: "1px solid rgba(255,255,255,0.05)",
         }}
       >
-        <span
-          className="text-[10px] font-medium text-foreground truncate leading-none"
-          style={{ maxWidth: 70 }}
-        >
+        <span className="text-[10px] font-medium text-foreground truncate" style={{ maxWidth: 72 }}>
           {group.stringId}
         </span>
         <span
-          className="text-[8px] px-1 rounded flex-shrink-0 leading-tight"
+          className="text-[8px] px-1 rounded flex-shrink-0"
           style={{
             background: color + "25",
             color,
@@ -115,74 +177,63 @@ const GanttRow = memo(function GanttRow({
         </span>
       </div>
 
-      {/* Bar area */}
+      {/* Timeline area */}
       <div
-        style={{ width: CHART_W, flexShrink: 0, padding: "4px 6px", height: "100%", display: "flex", alignItems: "center" }}
+        className="relative flex-1"
+        style={{ height: "100%", position: "relative" }}
+        onMouseEnter={(e) => onMouseEnter(e, group)}
+        onMouseLeave={onMouseLeave}
       >
-        <div
-          className="relative w-full rounded overflow-hidden cursor-default"
-          style={{ height: ROW_H - 10, background: "rgba(255,255,255,0.06)" }}
-          onMouseEnter={(e) =>
-            onMouseEnter(e, {
-              stringId: group.stringId,
-              oss: group.subStation,
-              status,
-              pct,
-              done: group.completed,
-              total: group.locations.length,
-              color,
-            })
-          }
-          onMouseLeave={onMouseLeave}
-        >
-          {/* Month grid lines */}
-          {tickPcts.map((tp, i) =>
-            tp > 0 && tp < 100 ? (
-              <div
-                key={i}
-                className="absolute top-0 h-full w-px"
-                style={{ left: `${tp}%`, background: "rgba(255,255,255,0.05)" }}
-              />
-            ) : null
-          )}
+        {/* Month grid lines */}
+        {tickPcts.map((tp, i) =>
+          tp > 0 && tp < 100 ? (
+            <div
+              key={i}
+              className="absolute top-0 h-full w-px"
+              style={{ left: `${tp}%`, background: "rgba(255,255,255,0.04)", zIndex: 0 }}
+            />
+          ) : null
+        )}
 
-          {/* Progress fill */}
+        {/* Campaign date-range bar */}
+        <div
+          className="absolute rounded"
+          style={{
+            left: `${Math.max(0, barLeftPct)}%`,
+            width: `${Math.min(100 - Math.max(0, barLeftPct), barWidthPct)}%`,
+            top: "20%",
+            height: "60%",
+            background: "rgba(255,255,255,0.08)",
+            overflow: "hidden",
+            cursor: "default",
+          }}
+        >
+          {/* Completion fill within campaign window */}
           {pct > 0 && (
             <div
               className="absolute top-0 left-0 h-full rounded-l"
               style={{
-                width: `${pct}%`,
+                width: fillWidthPx,
                 background: color,
-                opacity: pct === 100 ? 0.75 : 0.6,
-                transition: "width 0.3s",
+                opacity: pct === 100 ? 0.80 : 0.60,
               }}
             />
           )}
-
-          {/* % label inside bar (only when wide enough) */}
-          {pct >= 20 && (
-            <div
-              className="absolute top-0 left-0 h-full flex items-center px-1.5"
-              style={{ width: `${pct}%`, pointerEvents: "none" }}
-            >
-              <span className="text-[8px] font-semibold text-white/80">{pct}%</span>
+          {/* % label */}
+          {pct >= 25 && (
+            <div className="absolute top-0 left-0 h-full flex items-center px-1.5 pointer-events-none">
+              <span className="text-[8px] font-semibold text-white/75">{pct}%</span>
             </div>
           )}
-
-          {/* Today line */}
-          {todayPct >= 0 && todayPct <= 100 && (
-            <div
-              className="absolute top-0 h-full"
-              style={{
-                left: `${todayPct}%`,
-                width: 1.5,
-                background: "#52A8EC",
-                opacity: 0.9,
-                zIndex: 2,
-              }}
-            />
-          )}
         </div>
+
+        {/* Today line */}
+        {todayPct >= 0 && todayPct <= 100 && (
+          <div
+            className="absolute top-0 h-full"
+            style={{ left: `${todayPct}%`, width: 1.5, background: "#52A8EC", opacity: 0.85, zIndex: 3 }}
+          />
+        )}
       </div>
     </div>
   );
@@ -190,7 +241,7 @@ const GanttRow = memo(function GanttRow({
 
 /* ── Group header ────────────────────────────────────── */
 
-function GroupHeader({ oss, count }: { oss: string; count: number }) {
+function GroupHeader({ oss, count, top }: { oss: string; count: number; top: number }) {
   return (
     <div
       className="flex items-center"
@@ -200,22 +251,26 @@ function GroupHeader({ oss, count }: { oss: string; count: number }) {
         borderTop: "1px solid rgba(82,168,236,0.18)",
         borderBottom: "1px solid rgba(82,168,236,0.12)",
         position: "sticky",
-        top: HEADER_H,
+        top,
         zIndex: 3,
       }}
     >
       <div
         className="flex items-center gap-2 px-2"
-        style={{ width: LABEL_W, flexShrink: 0, position: "sticky", left: 0, zIndex: 5, background: "rgba(12,60,96,0.95)", height: "100%" }}
+        style={{
+          width: LABEL_W,
+          flexShrink: 0,
+          position: "sticky",
+          left: 0,
+          zIndex: 5,
+          background: "rgba(12,60,96,0.95)",
+          height: "100%",
+        }}
       >
-        <span className="text-[10px] font-bold" style={{ color: "#52A8EC" }}>
-          {oss}
-        </span>
-        <span className="text-[9px]" style={{ color: "#52A8EC99" }}>
-          {count}
-        </span>
+        <span className="text-[10px] font-bold" style={{ color: "#52A8EC" }}>{oss}</span>
+        <span className="text-[9px]" style={{ color: "#52A8EC80" }}>{count}</span>
       </div>
-      <div style={{ width: CHART_W, flexShrink: 0 }} />
+      <div className="flex-1" />
     </div>
   );
 }
@@ -236,7 +291,7 @@ export default memo(function GanttView() {
     return m;
   }, [stringDefs]);
 
-  /* Timeline bounds */
+  /* Timeline bounds from campaign dates */
   const { minDate, maxDate, rangeMs } = useMemo(() => {
     const dates = campaigns
       .flatMap((c) => [c.startDate, c.endDate])
@@ -249,14 +304,10 @@ export default memo(function GanttView() {
     }
     const minT = Math.min(...dates.map((d) => d.getTime()));
     const maxT = Math.max(...dates.map((d) => d.getTime()));
-    return {
-      minDate: new Date(minT),
-      maxDate: new Date(maxT),
-      rangeMs: maxT - minT || 1,
-    };
+    return { minDate: new Date(minT), maxDate: new Date(maxT), rangeMs: maxT - minT || 1 };
   }, [campaigns]);
 
-  /* Monthly ticks for X axis */
+  /* Monthly ticks */
   const ticks = useMemo(() => {
     const result: { date: Date; pct: number }[] = [];
     const cur = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
@@ -271,7 +322,7 @@ export default memo(function GanttView() {
   const tickPcts = useMemo(() => ticks.map((t) => t.pct), [ticks]);
 
   const today = new Date();
-  const todayPct = Math.max(-1, Math.min(101, ((today.getTime() - minDate.getTime()) / rangeMs) * 100));
+  const todayPct = ((today.getTime() - minDate.getTime()) / rangeMs) * 100;
 
   /* Filter & group by OSS */
   const filteredGroups = useMemo(() => {
@@ -293,13 +344,15 @@ export default memo(function GanttView() {
     return map;
   }, [filteredGroups]);
 
-  const handleMouseEnter = useCallback((e: React.MouseEvent, data: TooltipData) => {
-    setTooltip({ x: e.clientX, y: e.clientY, data });
-  }, []);
+  /* Pre-compute campaign assignment per string */
+  const campaignAssignment = useMemo(() => {
+    const m = new Map<string, { startDate: Date; endDate: Date; campaignName: string }>();
+    for (const g of filteredGroups) {
+      m.set(g.stringId, assignCampaign(g, campaigns, minDate, maxDate));
+    }
+    return m;
+  }, [filteredGroups, campaigns, minDate, maxDate]);
 
-  const handleMouseLeave = useCallback(() => setTooltip(null), []);
-
-  /* Resolve status for a group */
   const resolveStatus = useCallback(
     (g: StringGroup): string => {
       const sd = stringDefByName.get(g.stringId);
@@ -310,6 +363,33 @@ export default memo(function GanttView() {
     },
     [stringDefByName]
   );
+
+  const handleMouseEnter = useCallback(
+    (e: React.MouseEvent, g: StringGroup) => {
+      const status = resolveStatus(g);
+      const color = statusColor(status);
+      const ca = campaignAssignment.get(g.stringId)!;
+      setTooltip({
+        x: e.clientX,
+        y: e.clientY,
+        data: {
+          stringId: g.stringId,
+          oss: g.subStation,
+          status,
+          pct: g.progressPercent,
+          done: g.completed,
+          total: g.locations.length,
+          color,
+          campaignName: ca.campaignName,
+          startDate: ca.startDate,
+          endDate: ca.endDate,
+        },
+      });
+    },
+    [resolveStatus, campaignAssignment]
+  );
+
+  const handleMouseLeave = useCallback(() => setTooltip(null), []);
 
   /* ── Render ── */
 
@@ -342,7 +422,7 @@ export default memo(function GanttView() {
         style={{ background: "rgba(255,255,255,0.03)" }}
       >
         <span className="text-[10px]" style={{ color: "#8ba8c0" }}>
-          {fmtFull(minDate)} → {fmtFull(maxDate)}
+          {fmtShort(minDate)} → {fmtShort(maxDate)}
         </span>
         <span className="text-[10px] ml-2" style={{ color: "#52A8EC" }}>
           · {filteredGroups.length} strings
@@ -351,18 +431,14 @@ export default memo(function GanttView() {
 
       {/* Scrollable chart */}
       <div ref={containerRef} className="flex-1 overflow-auto" style={{ scrollbarWidth: "thin" }}>
-        <div style={{ minWidth: LABEL_W + CHART_W, position: "relative" }}>
+        <div style={{ minWidth: LABEL_W + 480, position: "relative" }}>
 
-          {/* Campaign background bands */}
-          <div
-            className="absolute top-0 h-full pointer-events-none"
-            style={{ left: LABEL_W, right: 0, zIndex: 0 }}
-          >
+          {/* Campaign background alternating bands */}
+          <div className="absolute top-0 h-full pointer-events-none" style={{ left: LABEL_W, right: 0, zIndex: 0 }}>
             {campaigns.map((c, i) => {
-              const s = c.startDate?.getTime() ?? minDate.getTime();
-              const e = c.endDate?.getTime() ?? maxDate.getTime();
-              const lp = ((s - minDate.getTime()) / rangeMs) * 100;
-              const wp = ((e - s) / rangeMs) * 100;
+              if (!c.startDate || !c.endDate) return null;
+              const lp = ((c.startDate.getTime() - minDate.getTime()) / rangeMs) * 100;
+              const wp = ((c.endDate.getTime() - c.startDate.getTime()) / rangeMs) * 100;
               return (
                 <div
                   key={i}
@@ -370,10 +446,7 @@ export default memo(function GanttView() {
                   style={{
                     left: `${Math.max(0, lp)}%`,
                     width: `${Math.min(100 - Math.max(0, lp), wp)}%`,
-                    background:
-                      i % 2 === 0
-                        ? "rgba(255,255,255,0.012)"
-                        : "rgba(0,0,0,0.08)",
+                    background: i % 2 === 0 ? "rgba(255,255,255,0.01)" : "rgba(0,0,0,0.07)",
                   }}
                 />
               );
@@ -383,15 +456,9 @@ export default memo(function GanttView() {
           {/* Sticky X-axis header */}
           <div
             className="flex border-b border-border"
-            style={{
-              position: "sticky",
-              top: 0,
-              zIndex: 6,
-              background: "hsl(207 79% 17%)",
-              height: HEADER_H,
-            }}
+            style={{ position: "sticky", top: 0, zIndex: 6, background: "hsl(207 79% 17%)", height: HEADER_H }}
           >
-            {/* Corner label */}
+            {/* Corner */}
             <div
               style={{
                 width: LABEL_W,
@@ -404,64 +471,30 @@ export default memo(function GanttView() {
               }}
               className="flex items-end px-2 pb-1"
             >
-              <span className="text-[9px] uppercase font-semibold text-muted-foreground">
-                String
-              </span>
+              <span className="text-[9px] uppercase font-semibold text-muted-foreground">String</span>
             </div>
 
             {/* Month ticks */}
-            <div
-              className="relative flex-1"
-              style={{ height: HEADER_H, overflow: "hidden", width: CHART_W, flexShrink: 0 }}
-            >
+            <div className="relative flex-1" style={{ height: HEADER_H, overflow: "hidden" }}>
               {ticks.map((tick, i) => (
                 <div
                   key={i}
                   className="absolute flex flex-col items-center"
-                  style={{
-                    left: `${tick.pct}%`,
-                    top: 0,
-                    transform: "translateX(-50%)",
-                    height: HEADER_H,
-                    justifyContent: "flex-end",
-                    paddingBottom: 4,
-                  }}
+                  style={{ left: `${tick.pct}%`, top: 0, transform: "translateX(-50%)", height: HEADER_H, justifyContent: "flex-end", paddingBottom: 4 }}
                 >
-                  <div
-                    className="w-px"
-                    style={{
-                      height: 6,
-                      background: "rgba(255,255,255,0.15)",
-                      marginBottom: 2,
-                    }}
-                  />
-                  <span
-                    className="text-[8px] whitespace-nowrap"
-                    style={{ color: "#6b8fa8" }}
-                  >
+                  <div className="w-px" style={{ height: 6, background: "rgba(255,255,255,0.15)", marginBottom: 2 }} />
+                  <span className="text-[8px] whitespace-nowrap" style={{ color: "#6b8fa8" }}>
                     {fmtMonthYear(tick.date)}
                   </span>
                 </div>
               ))}
-              {/* Today line in header */}
+              {/* Today line + label */}
               {todayPct >= 0 && todayPct <= 100 && (
                 <div
                   className="absolute top-0 h-full"
-                  style={{
-                    left: `${todayPct}%`,
-                    width: 1.5,
-                    background: "#52A8EC",
-                    opacity: 0.5,
-                  }}
+                  style={{ left: `${todayPct}%`, width: 1.5, background: "#52A8EC", opacity: 0.6 }}
                 >
-                  <span
-                    className="absolute text-[8px] font-semibold whitespace-nowrap"
-                    style={{
-                      color: "#52A8EC",
-                      top: 2,
-                      left: 3,
-                    }}
-                  >
+                  <span className="absolute text-[8px] font-semibold whitespace-nowrap" style={{ color: "#52A8EC", top: 3, left: 3 }}>
                     Today
                   </span>
                 </div>
@@ -469,15 +502,18 @@ export default memo(function GanttView() {
             </div>
           </div>
 
-          {/* Rows */}
+          {/* OSS groups and rows */}
           {orderedOss.map((oss) => {
             const groups = byOss.get(oss) ?? [];
             return (
               <div key={oss}>
-                <GroupHeader oss={oss} count={groups.length} />
+                <GroupHeader oss={oss} count={groups.length} top={HEADER_H} />
                 {groups.map((g) => {
                   const status = resolveStatus(g);
                   const color = statusColor(status);
+                  const ca = campaignAssignment.get(g.stringId)!;
+                  const barLeftPct = ((ca.startDate.getTime() - minDate.getTime()) / rangeMs) * 100;
+                  const barWidthPct = ((ca.endDate.getTime() - ca.startDate.getTime()) / rangeMs) * 100;
                   return (
                     <GanttRow
                       key={g.stringId}
@@ -486,6 +522,8 @@ export default memo(function GanttView() {
                       color={color}
                       todayPct={todayPct}
                       tickPcts={tickPcts}
+                      barLeftPct={barLeftPct}
+                      barWidthPct={barWidthPct}
                       onMouseEnter={handleMouseEnter}
                       onMouseLeave={handleMouseLeave}
                     />
@@ -506,24 +544,22 @@ export default memo(function GanttView() {
       {/* Campaign legend */}
       {campaigns.length > 0 && (
         <div
-          className="flex-shrink-0 border-t border-border px-3 py-1.5 flex flex-wrap gap-x-3 gap-y-0.5"
+          className="flex-shrink-0 border-t border-border px-3 py-1.5"
           style={{ background: "rgba(255,255,255,0.02)" }}
         >
-          <span className="text-[9px] uppercase font-semibold text-muted-foreground w-full mb-0.5">
-            Campaigns
-          </span>
-          {campaigns.map((c, i) => (
-            <span key={i} className="text-[9px]" style={{ color: "#6b8fa8" }}>
-              {c.name}
-            </span>
-          ))}
+          <span className="text-[9px] uppercase font-semibold text-muted-foreground block mb-0.5">Campaigns</span>
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+            {campaigns.map((c, i) => (
+              <span key={i} className="text-[9px]" style={{ color: "#6b8fa8" }}>
+                {c.name}{c.startDate && c.endDate ? ` (${fmtShort(c.startDate)}–${fmtShort(c.endDate)})` : ""}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
       {/* Tooltip */}
-      {tooltip && (
-        <Tooltip data={tooltip.data} x={tooltip.x} y={tooltip.y} />
-      )}
+      {tooltip && <Tooltip data={tooltip.data} x={tooltip.x} y={tooltip.y} />}
     </div>
   );
 });
