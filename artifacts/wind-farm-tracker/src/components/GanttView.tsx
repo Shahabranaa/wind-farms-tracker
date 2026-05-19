@@ -1,8 +1,19 @@
 import { memo, useMemo, useState, useCallback, useRef } from "react";
 import { useSheetData } from "@/context/SheetDataContext";
 import { useMapTab } from "@/context/MapTabContext";
-import { statusColor } from "@/lib/types";
 import type { StringGroup, Campaign } from "@/lib/types";
+
+/* Gantt-specific status colours (spec: completed=green, in-progress=amber, new=slate) */
+const GANTT_STATUS_COLOR: Record<string, string> = {
+  Completed:   "#22c55e",
+  "In Progress": "#f59e0b",
+  New:          "#64748b",
+  Excluded:     "#475569",
+};
+
+function ganttColor(status: string): string {
+  return GANTT_STATUS_COLOR[status] ?? "#64748b";
+}
 
 const LABEL_W  = 108;
 const ROW_H    = 26;
@@ -195,7 +206,7 @@ const GanttRow = memo(function GanttRow({
           ) : null
         )}
 
-        {/* Campaign date-range bar */}
+        {/* Campaign date-range bar — entire bar is status-colored */}
         <div
           className="absolute rounded"
           style={{
@@ -203,26 +214,26 @@ const GanttRow = memo(function GanttRow({
             width: `${Math.min(100 - Math.max(0, barLeftPct), barWidthPct)}%`,
             top: "20%",
             height: "60%",
-            background: "rgba(255,255,255,0.08)",
+            background: color + "28",   /* status-tinted track */
+            border: `1px solid ${color}50`,
             overflow: "hidden",
             cursor: "default",
           }}
         >
-          {/* Completion fill within campaign window */}
-          {pct > 0 && (
-            <div
-              className="absolute top-0 left-0 h-full rounded-l"
-              style={{
-                width: fillWidthPx,
-                background: color,
-                opacity: pct === 100 ? 0.80 : 0.60,
-              }}
-            />
-          )}
+          {/* Completion fill — brighter status color */}
+          <div
+            className="absolute top-0 left-0 h-full"
+            style={{
+              width: fillWidthPx,
+              background: color,
+              opacity: pct === 100 ? 0.80 : 0.65,
+              transition: "width 0.3s",
+            }}
+          />
           {/* % label */}
-          {pct >= 25 && (
+          {pct >= 22 && (
             <div className="absolute top-0 left-0 h-full flex items-center px-1.5 pointer-events-none">
-              <span className="text-[8px] font-semibold text-white/75">{pct}%</span>
+              <span className="text-[8px] font-semibold text-white/80">{pct}%</span>
             </div>
           )}
         </div>
@@ -367,7 +378,7 @@ export default memo(function GanttView() {
   const handleMouseEnter = useCallback(
     (e: React.MouseEvent, g: StringGroup) => {
       const status = resolveStatus(g);
-      const color = statusColor(status);
+      const color = ganttColor(status);
       const ca = campaignAssignment.get(g.stringId)!;
       setTooltip({
         x: e.clientX,
@@ -510,7 +521,7 @@ export default memo(function GanttView() {
                 <GroupHeader oss={oss} count={groups.length} top={HEADER_H} />
                 {groups.map((g) => {
                   const status = resolveStatus(g);
-                  const color = statusColor(status);
+                  const color = ganttColor(status);
                   const ca = campaignAssignment.get(g.stringId)!;
                   const barLeftPct = ((ca.startDate.getTime() - minDate.getTime()) / rangeMs) * 100;
                   const barWidthPct = ((ca.endDate.getTime() - ca.startDate.getTime()) / rangeMs) * 100;
