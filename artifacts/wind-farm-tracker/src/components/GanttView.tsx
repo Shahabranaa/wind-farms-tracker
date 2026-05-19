@@ -37,12 +37,26 @@ function fmtMonthYear(d: Date) {
  * Tries: (1) campaign name contains subStation, (2) campaign name contains stringId fragment.
  * Falls back to the whole-project window (first campaign with valid dates).
  */
+interface CampaignAssignment {
+  startDate: Date;
+  endDate: Date;
+  campaignName: string;
+  /** false when no campaign matched by name — fallback to project window */
+  isMatched: boolean;
+}
+
+/**
+ * Best-effort matching of a campaign to a string.
+ * Tries: (1) campaign name contains subStation, (2) campaign name contains stringId fragment.
+ * Falls back to the whole-project window (first campaign with valid dates).
+ * Returns isMatched=false when falling back so callers can surface the ambiguity.
+ */
 function assignCampaign(
   g: StringGroup,
   campaigns: Campaign[],
   projectStart: Date,
   projectEnd: Date,
-): { startDate: Date; endDate: Date; campaignName: string } {
+): CampaignAssignment {
   const oss = g.subStation.toUpperCase();
   const sid = g.stringId.toUpperCase();
 
@@ -52,7 +66,7 @@ function assignCampaign(
     return c.startDate && c.endDate && (cn.includes(oss) || oss.includes(cn.slice(0, 4)));
   });
   if (byOss?.startDate && byOss?.endDate) {
-    return { startDate: byOss.startDate, endDate: byOss.endDate, campaignName: byOss.name };
+    return { startDate: byOss.startDate, endDate: byOss.endDate, campaignName: byOss.name, isMatched: true };
   }
 
   // 2. Try to match by string ID fragment
@@ -61,15 +75,16 @@ function assignCampaign(
     return c.startDate && c.endDate && (cn.includes(sid.slice(0, 3)));
   });
   if (bySid?.startDate && bySid?.endDate) {
-    return { startDate: bySid.startDate, endDate: bySid.endDate, campaignName: bySid.name };
+    return { startDate: bySid.startDate, endDate: bySid.endDate, campaignName: bySid.name, isMatched: true };
   }
 
-  // 3. Fall back to overall project window
+  // 3. Fall back to overall project window — mark as unmatched so the UI can indicate this
   const first = campaigns.find((c) => c.startDate && c.endDate);
   return {
     startDate: first?.startDate ?? projectStart,
     endDate: first?.endDate ?? projectEnd,
     campaignName: first?.name ?? "Project",
+    isMatched: false,
   };
 }
 
@@ -130,8 +145,8 @@ function Tooltip({ data, x, y }: { data: TooltipData; x: number; y: number }) {
 
 const GanttRow = memo(function GanttRow({
   group,
-  status,
   color,
+  isMatched,
   todayPct,
   tickPcts,
   barLeftPct,
@@ -140,12 +155,13 @@ const GanttRow = memo(function GanttRow({
   onMouseLeave,
 }: {
   group: StringGroup;
-  status: string;
   color: string;
+  /** Whether this row's campaign window was matched by name (vs. project-wide fallback) */
+  isMatched: boolean;
   todayPct: number;
   tickPcts: number[];
-  barLeftPct: number;   // % position of campaign start within timeline
-  barWidthPct: number;  // % width of campaign window
+  barLeftPct: number;
+  barWidthPct: number;
   onMouseEnter: (e: React.MouseEvent, g: StringGroup) => void;
   onMouseLeave: () => void;
 }) {
@@ -171,8 +187,12 @@ const GanttRow = memo(function GanttRow({
           borderRight: "1px solid rgba(255,255,255,0.05)",
         }}
       >
-        <span className="text-[10px] font-medium text-foreground truncate" style={{ maxWidth: 72 }}>
-          {group.stringId}
+        <span
+          className="text-[10px] font-medium truncate"
+          style={{ maxWidth: 72, color: isMatched ? undefined : "#64748b" }}
+          title={isMatched ? undefined : "Campaign window estimated from project range"}
+        >
+          {group.stringId}{!isMatched && <span style={{ color: "#475569", marginLeft: 2 }}>~</span>}
         </span>
         <span
           className="text-[8px] px-1 rounded flex-shrink-0"
@@ -357,7 +377,7 @@ export default memo(function GanttView() {
 
   /* Pre-compute campaign assignment per string */
   const campaignAssignment = useMemo(() => {
-    const m = new Map<string, { startDate: Date; endDate: Date; campaignName: string }>();
+    const m = new Map<string, CampaignAssignment>();
     for (const g of filteredGroups) {
       m.set(g.stringId, assignCampaign(g, campaigns, minDate, maxDate));
     }
@@ -529,8 +549,8 @@ export default memo(function GanttView() {
                     <GanttRow
                       key={g.stringId}
                       group={g}
-                      status={status}
                       color={color}
+                      isMatched={ca.isMatched}
                       todayPct={todayPct}
                       tickPcts={tickPcts}
                       barLeftPct={barLeftPct}
