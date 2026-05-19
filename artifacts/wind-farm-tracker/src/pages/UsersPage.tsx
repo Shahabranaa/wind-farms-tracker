@@ -66,7 +66,7 @@ export default function UsersPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-foreground">{u.email}</span>
-                      {u.isAdmin && <ShieldCheck className="h-3.5 w-3.5 text-primary" title="Admin" />}
+                      {u.isAdmin && <ShieldCheck className="h-3.5 w-3.5 text-primary" aria-label="Admin" />}
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Joined {new Date(u.dateJoined).toLocaleDateString()}
